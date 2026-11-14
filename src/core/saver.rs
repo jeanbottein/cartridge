@@ -1,47 +1,23 @@
-//! Pipeline step 9: back up (or restore) save folders into `saves-copies/`,
-//! plus `BACKUP_<name>` folders, the config file, and an optional tree of
-//! symlinks to the live save folders in `saves-links/` (for Syncthing & co).
+//! SAVES tab: each game's save folders and their backup, backed up or
+//! restored one game at a time, by hand.
 //!
-//! One save path  → `saves-copies/<Title>/`
-//! 2+ save paths  → `saves-copies/<Title>/<folder name>/`
+//! A game's backup is `saves-copies/<game folder>/<save folder>/` (folder
+//! names don't change when a game is renamed). A backup is written under a
+//! hidden name and only takes the real one once complete, so a failed copy
+//! never passes for a backup. A restore empties the save folders and copies
+//! the backup in: the user chose to replace their saves.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
-use log::{error, info, warn};
-
-use super::config::Config;
-use super::models::Game;
-use super::paths;
+use super::models::{Game, Install};
+use super::{package, paths, steam};
 
 const WINDOWS_RESERVED: [&str; 22] = [
     "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
     "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
 ];
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Strategy {
-    Backup,
-    Sync,
-    Restore,
-}
-
-fn strategy(raw: Option<&str>) -> Strategy {
-    let value = raw.unwrap_or("backup").trim().to_lowercase();
-    match value.as_str() {
-        "backup" => Strategy::Backup,
-        "sync" => Strategy::Sync,
-        "restore" => Strategy::Restore,
-        _ => {
-            warn!("Invalid SAVESCOPY_STRATEGY '{value}', falling back to 'backup'");
-            Strategy::Backup
-        }
-    }
-}
-
-fn base_path(raw: &str) -> PathBuf {
-    paths::abspath(&paths::expand(raw))
-}
 
 /// A folder name safe on every OS.
 pub fn sanitize_title(title: &str) -> String {
@@ -75,220 +51,8 @@ pub fn sanitize_title(title: &str) -> String {
     }
 }
 
-/// Every file under `root` by relative path (folder symlinks not followed).
-fn file_map(root: &Path) -> BTreeMap<PathBuf, PathBuf> {
-    fn walk(dir: &Path, root: &Path, out: &mut BTreeMap<PathBuf, PathBuf>) {
-        for path in paths::sorted_entries(dir).into_iter().map(|n| dir.join(n)) {
-            if path.is_dir() {
-                if !paths::is_symlink(&path) {
-                    walk(&path, root, out);
-                }
-            } else {
-                out.insert(path.strip_prefix(root).unwrap_or(&path).to_path_buf(), path);
-            }
-        }
-    }
-    let mut out = BTreeMap::new();
-    if root.is_dir() {
-        walk(root, root, &mut out);
-    }
-    out
-}
-
-/// Same size and not older than the source.
-fn is_current(src: &Path, dst: &Path) -> bool {
-    let (Ok(s), Ok(d)) = (std::fs::metadata(src), std::fs::metadata(dst)) else {
-        return false;
-    };
-    let (Ok(sm), Ok(dm)) = (s.modified(), d.modified()) else {
-        return false;
-    };
-    s.len() == d.len() && sm <= dm
-}
-
-fn copy_file(src: &Path, dst: &Path) {
-    if let Some(dir) = dst.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    if is_current(src, dst) {
-        return;
-    }
-    if let Err(e) = paths::copy_with_mtime(src, dst) {
-        error!("Error copying {} -> {}: {e}", src.display(), dst.display());
-    }
-}
-
-/// Mirror `src` into `dst`, deleting backup files whose source is gone.
-fn backup_dir(title: &str, src: &Path, dst: &Path) {
-    if !src.is_dir() {
-        info!("  {title}: source {} not found, skipping", src.display());
-        return;
-    }
-    let src_files = file_map(src);
-    if src_files.is_empty() {
-        info!("  {title}: source {} is empty, skipping", src.display());
-        return;
-    }
-    let dst_files = file_map(dst);
-    let _ = std::fs::create_dir_all(dst);
-    info!("  Backing up: {title}");
-    src_files
-        .iter()
-        .for_each(|(rel, path)| copy_file(path, &dst.join(rel)));
-    for (_, obsolete) in dst_files
-        .iter()
-        .filter(|(rel, _)| !src_files.contains_key(*rel))
-    {
-        if let Err(e) = std::fs::remove_file(obsolete) {
-            error!(
-                "  Error removing obsolete backup file {}: {e}",
-                obsolete.display()
-            );
-        }
-    }
-}
-
-fn restore_dir(title: &str, src: &Path, dst: &Path) {
-    if !dst.is_dir() {
-        info!(
-            "  {title}: backup {} not found, skipping restore",
-            dst.display()
-        );
-        return;
-    }
-    let _ = std::fs::create_dir_all(src);
-    warn!("  Restoring: {title} (overwrites existing files)");
-    file_map(dst)
-        .iter()
-        .for_each(|(rel, path)| copy_file(path, &src.join(rel)));
-}
-
-fn sync_directory(title: &str, src: &Path, dst: &Path, strategy: Strategy) {
-    match strategy {
-        Strategy::Backup => backup_dir(title, src, dst),
-        Strategy::Sync => {
-            info!("  {title}: 'sync' strategy behaves like 'backup' (use saves-links/ + Syncthing for bidirectional sync)");
-            backup_dir(title, src, dst);
-        }
-        Strategy::Restore => restore_dir(title, src, dst),
-    }
-}
-
-// ── Symlink tree ─────────────────────────────────────────────────────────
-
-fn symlink(target: &Path, link: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    return std::os::unix::fs::symlink(target, link);
-    #[cfg(windows)]
-    return if target.is_dir() {
-        std::os::windows::fs::symlink_dir(target, link)
-    } else {
-        std::os::windows::fs::symlink_file(target, link)
-    };
-}
-
-/// Remove a symlink (Windows removes folder links with `remove_dir`).
-fn remove_link(link: &Path) -> std::io::Result<()> {
-    std::fs::remove_file(link).or_else(|_| std::fs::remove_dir(link))
-}
-
-/// Remove a folder of our links (left when a game had several save paths).
-/// A folder holding anything but symlinks is the user's: it stays.
-fn remove_link_folder(dir: &Path) -> bool {
-    let entries: Vec<PathBuf> = paths::sorted_entries(dir)
-        .into_iter()
-        .map(|n| dir.join(n))
-        .collect();
-    if !entries.iter().all(|p| paths::is_symlink(p)) {
-        return false;
-    }
-    entries.iter().for_each(|link| {
-        let _ = remove_link(link);
-    });
-    std::fs::remove_dir(dir).is_ok()
-}
-
-fn create_symlink(link: &Path, target: &Path) {
-    if paths::is_symlink(link) {
-        if std::fs::read_link(link).is_ok_and(|t| t == target) {
-            return;
-        }
-        let _ = remove_link(link);
-    } else if link.exists() && !(link.is_dir() && remove_link_folder(link)) {
-        warn!("  {} exists and is not a symlink, skipping", link.display());
-        return;
-    }
-    if let Some(dir) = link.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    if let Err(e) = symlink(target, link) {
-        error!(
-            "  Error creating symlink {} -> {}: {e}",
-            link.display(),
-            target.display()
-        );
-    }
-}
-
-fn remove_stale_symlinks(root: &Path, active: &HashSet<String>) {
-    for name in paths::sorted_entries(root)
-        .into_iter()
-        .filter(|n| !active.contains(n))
-    {
-        let path = root.join(&name);
-        if !paths::is_symlink(&path) {
-            if path.is_dir() && remove_link_folder(&path) {
-                info!("  Removed stale symlinks: {name}/");
-            }
-            continue;
-        }
-        info!("  Removing stale symlink: {name}");
-        if let Err(e) = remove_link(&path) {
-            error!("  Error removing stale symlink {}: {e}", path.display());
-        }
-    }
-}
-
-/// A symlink to create: `root/<top>` or `root/<top>/<sub>` → `source`.
-struct LinkEntry {
-    top: String,
-    sub: Option<String>,
-    source: PathBuf,
-}
-
-fn build_symlink_tree(entries: &[LinkEntry], root: &Path) {
-    let _ = std::fs::create_dir_all(root);
-    let mut created = HashSet::new();
-    for entry in entries.iter().filter(|e| e.source.is_dir()) {
-        let top = root.join(&entry.top);
-        let link = match &entry.sub {
-            None => top,
-            Some(sub) => {
-                // A link left from when the game had one save path: links
-                // created through it would land in the live save folder.
-                if paths::is_symlink(&top) {
-                    let _ = remove_link(&top);
-                }
-                top.join(sub)
-            }
-        };
-        create_symlink(&link, &entry.source);
-        created.insert(entry.top.clone());
-    }
-    remove_stale_symlinks(root, &created);
-    if !created.is_empty() {
-        info!(
-            "  Symlink tree updated at {} ({} entries)",
-            root.display(),
-            created.len()
-        );
-    }
-}
-
-// ── Run ──────────────────────────────────────────────────────────────────
-
 /// Hands out folder names, adding `_2`, `_3`… to a name already taken, so
-/// two backups never share (and prune) one folder. Case-insensitive:
+/// two save folders never share one backup folder. Case-insensitive:
 /// Windows and macOS folders are.
 #[derive(Default)]
 struct FolderNames(HashSet<String>);
@@ -304,107 +68,397 @@ impl FolderNames {
     }
 }
 
-fn process_game_saves(
-    games: &[Game],
-    saves_root: &Path,
-    strategy: Strategy,
-    tops: &mut FolderNames,
-) -> Vec<LinkEntry> {
-    let mut links = Vec::new();
-    let mut processed = 0;
-    for game in games.iter().filter(|g| !g.resolved_save_paths.is_empty()) {
-        let title = tops.claim(&sanitize_title(&game.title));
-        let multi = game.resolved_save_paths.len() > 1;
-        let mut subs = FolderNames::default();
-        for save in &game.resolved_save_paths {
-            let sub = subs.claim(&sanitize_title(
-                &save.file_name().unwrap_or_default().to_string_lossy(),
-            ));
-            let (dst, label) = if multi {
-                (
-                    saves_root.join(&title).join(&sub),
-                    format!("{}/{sub}", game.title),
-                )
+/// Every file under `root` by relative path. Links are skipped: a save
+/// backup copies the saves, never what a link points to.
+fn file_map(root: &Path) -> BTreeMap<PathBuf, PathBuf> {
+    fn walk(dir: &Path, root: &Path, out: &mut BTreeMap<PathBuf, PathBuf>) {
+        for path in entries(dir) {
+            if path.is_dir() {
+                walk(&path, root, out);
             } else {
-                (saves_root.join(&title), game.title.clone())
-            };
-            sync_directory(&label, save, &dst, strategy);
-            links.push(LinkEntry {
-                top: title.clone(),
-                sub: multi.then_some(sub),
-                source: save.clone(),
-            });
+                out.insert(path.strip_prefix(root).unwrap_or(&path).to_path_buf(), path);
+            }
         }
-        processed += 1;
     }
-    if processed > 0 {
-        info!("Processed saves for {processed} game(s)");
+    let mut out = BTreeMap::new();
+    if root.is_dir() {
+        walk(root, root, &mut out);
     }
-    links
+    out
 }
 
-fn process_custom_backups(
-    cfg: &Config,
-    saves_root: &Path,
-    strategy: Strategy,
-    tops: &mut FolderNames,
-) -> Vec<LinkEntry> {
-    let custom: Vec<(&str, &str)> = cfg
-        .values()
-        .iter()
-        .filter_map(|(k, v)| {
-            k.strip_prefix("BACKUP_")
-                .filter(|n| !n.is_empty())
-                .map(|n| (n, v.as_str()))
-        })
-        .collect();
-    if custom.is_empty() {
-        return Vec::new();
-    }
-    info!("Processing {} custom directory backup(s)", custom.len());
-    custom
+/// What `dir` holds, links left out (copies and restores never touch them).
+fn entries(dir: &Path) -> Vec<PathBuf> {
+    paths::sorted_entries(dir)
         .into_iter()
-        .map(|(name, source)| {
-            let src = base_path(source);
-            let top = tops.claim(&sanitize_title(name));
-            sync_directory(name, &src, &saves_root.join(&top), strategy);
-            LinkEntry {
-                top,
-                sub: None,
-                source: src,
-            }
-        })
+        .map(|name| dir.join(name))
+        .filter(|path| !paths::is_symlink(path))
         .collect()
 }
 
-pub fn run(games: &[Game], cfg: &Config) {
-    let saves_root = cfg.saves_copies_dir();
-    if let Err(e) = std::fs::create_dir_all(&saves_root) {
-        error!("Cannot create {}: {e}", saves_root.display());
-        return;
-    }
-    let strategy = strategy(cfg.get("SAVESCOPY_STRATEGY"));
-    info!(
-        "Running saver with strategy='{}'",
-        format!("{strategy:?}").to_lowercase()
-    );
+// ── A game's saves ───────────────────────────────────────────────────────
 
-    let mut tops = FolderNames::default();
-    let mut links = process_game_saves(games, &saves_root, strategy, &mut tops);
-    links.extend(process_custom_backups(
-        cfg,
-        &saves_root,
-        strategy,
-        &mut tops,
-    ));
+/// One save folder of a game, and the name of its copy in the backup.
+#[derive(Clone, Debug)]
+pub struct SaveFolder {
+    pub device: PathBuf,
+    pub name: String,
+}
 
-    let link_root = cfg.saves_links_dir();
-    // Without links, still prune the ones left from games that had saves.
-    if links.is_empty() && !link_root.is_dir() {
-        return;
+/// A game's save folders on this machine and where they are backed up.
+#[derive(Clone, Debug)]
+pub struct Saves {
+    /// `saves-copies/<game folder>`.
+    pub backup: PathBuf,
+    pub folders: Vec<SaveFolder>,
+    /// The saves live in the game's own folder (portable saves).
+    pub in_game: bool,
+    /// Only the package exists: its save paths aren't read.
+    packaged: bool,
+    /// The Proton prefix (`drive_c`) holding save folders, if any.
+    prefix: Option<PathBuf>,
+    /// A save path a restore must not empty (see `is_too_wide`).
+    too_wide: Option<PathBuf>,
+}
+
+/// Folders many apps share, under the home folder (or a Proton prefix's
+/// user folder): a save path may be inside one, never one of them.
+const SHARED: [&str; 18] = [
+    ".config",
+    ".local",
+    ".local/share",
+    ".local/state",
+    ".cache",
+    ".var",
+    ".var/app",
+    ".steam",
+    "Desktop",
+    "Documents",
+    "Documents/My Games",
+    "Downloads",
+    "Saved Games",
+    "AppData",
+    "AppData/Local",
+    "AppData/LocalLow",
+    "AppData/Roaming",
+    "Library/Application Support",
+];
+
+pub fn saves_of(game: &Game, saves_root: &Path) -> Saves {
+    let mut names = FolderNames::default();
+    let folders: Vec<SaveFolder> = game
+        .resolved_save_paths
+        .iter()
+        .map(|device| SaveFolder {
+            name: names.claim(&sanitize_title(
+                &device.file_name().unwrap_or_default().to_string_lossy(),
+            )),
+            device: device.clone(),
+        })
+        .collect();
+    let prefix = steam::appid_of(game)
+        .map(|appid| paths::expand(&steam::proton_prefix(appid)))
+        .filter(|prefix| folders.iter().any(|f| f.device.starts_with(prefix)));
+    let kept = kept_folders(&game.dir, saves_root, prefix.as_deref());
+    Saves {
+        backup: saves_root.join(&game.folder_name),
+        in_game: folders.iter().any(|f| f.device.starts_with(&game.dir)),
+        packaged: matches!(game.install, Install::Packaged { .. }),
+        too_wide: folders
+            .iter()
+            .map(|f| f.device.clone())
+            .find(|device| is_too_wide(device, &kept, saves_root)),
+        prefix,
+        folders,
     }
-    info!("Building symlink tree at {}", link_root.display());
-    build_symlink_tree(&links, &link_root);
+}
+
+/// Folders a save path must not be, nor hold: the home folder, the game,
+/// the backups, the folders apps share (also in the game's Proton prefix).
+fn kept_folders(game_dir: &Path, saves_root: &Path, prefix: Option<&Path>) -> Vec<PathBuf> {
+    let home = paths::home_dir();
+    let users = [
+        Some(home.clone()),
+        prefix.map(|p| p.join("users/steamuser")),
+    ];
+    let shared = users
+        .into_iter()
+        .flatten()
+        .flat_map(|user| SHARED.iter().map(move |s| user.join(s)));
+    [home, game_dir.to_path_buf(), saves_root.to_path_buf()]
+        .into_iter()
+        .chain(prefix.map(Path::to_path_buf))
+        .chain(shared)
+        .map(|p| real_path(&p))
+        .collect()
+}
+
+/// `path` with its links resolved, also when its end doesn't exist yet (a
+/// save folder the game hasn't made): `/home` is a link on some systems.
+fn real_path(path: &Path) -> PathBuf {
+    let path = paths::abspath(path);
+    path.ancestors()
+        .find_map(|a| {
+            Some(
+                std::fs::canonicalize(a)
+                    .ok()?
+                    .join(path.strip_prefix(a).ok()?),
+            )
+        })
+        .unwrap_or(path)
+}
+
+/// A save path a restore must not empty: a disk (root or mount point), a
+/// kept folder or one holding it, or a folder inside the backups.
+fn is_too_wide(device: &Path, kept: &[PathBuf], saves_root: &Path) -> bool {
+    let device = real_path(device);
+    device.parent().is_none()
+        || is_mount_point(&device)
+        || device.starts_with(real_path(saves_root))
+        || kept.iter().any(|k| k.starts_with(&device))
+}
+
+/// A whole disk mounted there (an SD card, a USB drive).
+#[cfg(unix)]
+fn is_mount_point(dir: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let device_of = |p: &Path| std::fs::metadata(p).map(|m| m.dev()).ok();
+    match (device_of(dir), dir.parent().and_then(device_of)) {
+        (Some(own), Some(parent)) => own != parent,
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn is_mount_point(_dir: &Path) -> bool {
+    false
+}
+
+// ── Status ───────────────────────────────────────────────────────────────
+
+/// The files of a set of folders: newest modification, count, total size.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Stamp {
+    pub modified: SystemTime,
+    pub files: usize,
+    pub bytes: u64,
+}
+
+fn stamp(dirs: impl IntoIterator<Item = PathBuf>) -> Option<Stamp> {
+    let files: Vec<std::fs::Metadata> = dirs
+        .into_iter()
+        .flat_map(|dir| file_map(&dir).into_values())
+        .filter_map(|path| std::fs::metadata(path).ok())
+        .collect();
+    let modified = files.iter().filter_map(|m| m.modified().ok()).max()?;
+    Some(Stamp {
+        modified,
+        files: files.len(),
+        bytes: files.iter().map(std::fs::Metadata::len).sum(),
+    })
+}
+
+/// What the SAVES tab shows for a game: both sides, and why a copy can't
+/// be made, if it can't.
+#[derive(Clone, Debug)]
+pub struct Report {
+    pub device: Option<Stamp>,
+    pub backup: Option<Stamp>,
+    pub cannot_back_up: Option<String>,
+    pub cannot_restore: Option<String>,
+}
+
+const NO_SAVES: &str = "No saves to back up yet.";
+const NO_BACKUP: &str = "No backup yet.";
+
+pub fn report(saves: &Saves) -> Report {
+    let device = stamp(saves.folders.iter().map(|f| f.device.clone()));
+    let backup = stamp(saves.folders.iter().map(|f| saves.backup.join(&f.name)));
+    let refused = refusal(saves);
+    Report {
+        cannot_back_up: refused
+            .clone()
+            .or_else(|| device.is_none().then(|| NO_SAVES.into())),
+        cannot_restore: refused
+            .or_else(|| backup.is_none().then(|| NO_BACKUP.into()))
+            .or_else(|| missing_prefix(saves)),
+        device,
+        backup,
+    }
+}
+
+/// Why neither a backup nor a restore can be made, if so.
+fn refusal(saves: &Saves) -> Option<String> {
+    if saves.packaged {
+        return Some("Packaged game: unpack it to back up or restore its saves.".into());
+    }
+    if saves.folders.is_empty() {
+        return Some("No save path: add one in the game's editor (Library, X).".into());
+    }
+    saves.too_wide.as_ref().map(|path| {
+        format!(
+            "Unsafe save path {}: a restore would empty a folder other apps or games use.",
+            path.display()
+        )
+    })
+}
+
+fn missing_prefix(saves: &Saves) -> Option<String> {
+    saves
+        .prefix
+        .as_ref()
+        .filter(|p| !p.is_dir())
+        .map(|_| "Launch the game once first: its Proton prefix doesn't exist yet.".into())
+}
+
+// ── Copies ───────────────────────────────────────────────────────────────
+
+fn io_error(path: &Path) -> impl Fn(std::io::Error) -> String + '_ {
+    move |e| format!("{}: {e}", path.display())
+}
+
+/// Copy a file, on disk before this returns: the backup it belongs to may
+/// replace the previous one right after.
+fn copy_file(src: &Path, dst: &Path) -> Result<(), String> {
+    paths::copy_with_mtime(src, dst).map_err(io_error(src))?;
+    // Windows flushes through a handle with write access only.
+    std::fs::File::options()
+        .read(true)
+        .write(cfg!(windows))
+        .open(dst)
+        .and_then(|f| f.sync_all())
+        .map_err(io_error(dst))
+}
+
+/// Copy `src` into `dst`, empty folders included; the number of files.
+fn copy_tree(src: &Path, dst: &Path) -> Result<usize, String> {
+    std::fs::create_dir_all(dst).map_err(io_error(dst))?;
+    entries(src)
+        .into_iter()
+        .map(|from| {
+            let to = dst.join(from.file_name().unwrap_or_default());
+            if from.is_dir() {
+                copy_tree(&from, &to)
+            } else {
+                copy_file(&from, &to).map(|()| 1)
+            }
+        })
+        .sum()
+}
+
+fn remove_dir_if_exists(dir: &Path) -> Result<(), String> {
+    match std::fs::remove_dir_all(dir) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(io_error(dir)(e)),
+        _ => Ok(()),
+    }
+}
+
+/// `dir` emptied (created when missing), links left in place. `dir` itself
+/// stays, so a save folder linked elsewhere still is.
+fn empty_dir(dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(io_error(dir))?;
+    entries(dir).iter().try_for_each(|path| {
+        if path.is_dir() {
+            std::fs::remove_dir_all(path)
+        } else {
+            std::fs::remove_file(path)
+        }
+        .map_err(io_error(path))
+    })
+}
+
+/// Where a backup is written before it is complete (hidden).
+fn part_of(backup: &Path) -> PathBuf {
+    let name = backup.file_name().unwrap_or_default().to_string_lossy();
+    backup.with_file_name(package::staging_name(&name))
+}
+
+/// Where the previous backup goes while the new one takes its name.
+fn old_of(backup: &Path) -> PathBuf {
+    let name = backup.file_name().unwrap_or_default().to_string_lossy();
+    backup.with_file_name(format!(".{name}.old"))
+}
+
+fn rename(from: &Path, to: &Path) -> Result<(), String> {
+    std::fs::rename(from, to).map_err(|e| format!("{} -> {}: {e}", from.display(), to.display()))
+}
+
+/// Finish a backup interrupted between its two renames (crash, power
+/// loss): the previous backup, put aside, is the last complete one.
+pub fn recover(saves: &Saves) -> Result<(), String> {
+    let old = old_of(&saves.backup);
+    if saves.backup.exists() || !old.is_dir() {
+        return Ok(());
+    }
+    rename(&old, &saves.backup)
+}
+
+/// Copy the save folders into `saves.backup`. The copy is made under a
+/// hidden name and replaces the previous backup only once complete: when it
+/// fails, the previous backup stays as it was.
+pub fn backup(saves: &Saves) -> Result<(), String> {
+    if let Some(why) = refusal(saves) {
+        return Err(why);
+    }
+    recover(saves)?;
+    let (part, old) = (part_of(&saves.backup), old_of(&saves.backup));
+    remove_dir_if_exists(&part)?;
+    remove_dir_if_exists(&old)?;
+    match copy_saves(saves, &part) {
+        Ok(0) => {
+            remove_dir_if_exists(&part)?;
+            Err(NO_SAVES.into())
+        }
+        Ok(_) => swap_in(&part, &saves.backup, &old),
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&part);
+            Err(format!("Backup failed, the previous one is kept: {e}"))
+        }
+    }
+}
+
+/// Copy the save folders that exist into `into`; the number of files.
+fn copy_saves(saves: &Saves, into: &Path) -> Result<usize, String> {
+    saves
+        .folders
+        .iter()
+        .filter(|f| f.device.is_dir())
+        .map(|f| copy_tree(&f.device, &into.join(&f.name)))
+        .sum()
+}
+
+/// Put the finished copy `part` in place of `target`, by renames (no rename
+/// replaces a folder on Windows): `target` → `old`, `part` → `target`.
+fn swap_in(part: &Path, target: &Path, old: &Path) -> Result<(), String> {
+    if target.exists() {
+        rename(target, old)?;
+    }
+    rename(part, target)?;
+    // Hidden, and removed by the next backup anyway.
+    let _ = std::fs::remove_dir_all(old);
+    Ok(())
+}
+
+/// Replace the save folders' contents with the backup. Folders with no copy
+/// in the backup are left alone.
+pub fn restore(saves: &Saves) -> Result<(), String> {
+    if let Some(why) = refusal(saves).or_else(|| missing_prefix(saves)) {
+        return Err(why);
+    }
+    recover(saves)?;
+    let sources: Vec<(&SaveFolder, PathBuf)> = saves
+        .folders
+        .iter()
+        .map(|f| (f, saves.backup.join(&f.name)))
+        .filter(|(_, copy)| copy.is_dir())
+        .collect();
+    if sources.is_empty() {
+        return Err(NO_BACKUP.into());
+    }
+    sources.iter().try_for_each(|(folder, copy)| {
+        empty_dir(&folder.device)?;
+        copy_tree(copy, &folder.device).map(|_| ())
+    })
 }
 
 #[cfg(test)]
@@ -424,32 +478,6 @@ mod tests {
     }
 
     #[test]
-    fn backup_mirrors_and_prunes_then_restore_copies_back() {
-        let dir = TempDir::new();
-        let src = dir.mkdir("live");
-        dir.write("live/slot1.sav", b"one");
-        dir.write("live/sub/slot2.sav", b"two");
-        let dst = dir.path().join("backup");
-        dir.write("backup/obsolete.sav", b"old");
-
-        backup_dir("Game", &src, &dst);
-        assert_eq!(std::fs::read(dst.join("sub/slot2.sav")).unwrap(), b"two");
-        assert!(!dst.join("obsolete.sav").exists());
-
-        std::fs::remove_file(src.join("slot1.sav")).unwrap();
-        restore_dir("Game", &src, &dst);
-        assert_eq!(std::fs::read(src.join("slot1.sav")).unwrap(), b"one");
-    }
-
-    fn game_with_saves(title: &str, saves: Vec<PathBuf>) -> Game {
-        Game {
-            title: title.into(),
-            resolved_save_paths: saves,
-            ..Default::default()
-        }
-    }
-
-    #[test]
     fn folder_names_add_a_number_to_a_taken_name_ignoring_case() {
         let mut names = FolderNames::default();
         assert_eq!(names.claim("Saves"), "Saves");
@@ -457,176 +485,262 @@ mod tests {
         assert_eq!(names.claim("Saves"), "Saves_3");
     }
 
-    #[test]
-    fn save_paths_with_the_same_folder_name_back_up_to_separate_folders() {
-        let dir = TempDir::new();
-        dir.write("local/Studio/Saves/a.sav", b"a");
-        dir.write("documents/Studio/Saves/b.sav", b"b");
-        let game = game_with_saves(
-            "Game",
-            vec![
-                dir.path().join("local/Studio/Saves"),
-                dir.path().join("documents/Studio/Saves"),
-            ],
-        );
-        let root = dir.path().join("saves-copies");
+    /// A game in `<tmp>/games/Game` with these save folders.
+    fn game(dir: &TempDir, saves: &[&str]) -> Game {
+        let mut game = Game::skeleton(&dir.path().join("games/Game"));
+        game.title = "Some Title".into();
+        game.resolved_save_paths = saves.iter().map(|s| dir.path().join(s)).collect();
+        game
+    }
 
-        process_game_saves(
-            &[game],
-            &root,
-            Strategy::Backup,
-            &mut FolderNames::default(),
-        );
-        assert!(root.join("Game/Saves/a.sav").exists());
-        assert!(root.join("Game/Saves_2/b.sav").exists());
+    fn saves(dir: &TempDir, game: &Game) -> Saves {
+        saves_of(game, &dir.path().join("saves-copies"))
+    }
+
+    fn read(path: PathBuf) -> String {
+        std::fs::read_to_string(path).unwrap()
     }
 
     #[test]
-    fn titles_that_sanitize_alike_back_up_to_separate_folders() {
+    fn a_backup_is_named_after_the_game_folder_with_one_folder_per_save_path() {
         let dir = TempDir::new();
-        dir.write("one/a.sav", b"a");
-        dir.write("two/b.sav", b"b");
-        let games = [
-            game_with_saves("Game: X", vec![dir.path().join("one")]),
-            game_with_saves("Game? X", vec![dir.path().join("two")]),
-        ];
-        let root = dir.path().join("saves-copies");
-
-        process_game_saves(&games, &root, Strategy::Backup, &mut FolderNames::default());
-        assert!(root.join("Game__X/a.sav").exists());
-        assert!(root.join("Game__X_2/b.sav").exists());
+        let game = game(&dir, &["local/Studio/Saves", "documents/Studio/Saves"]);
+        let saves = saves(&dir, &game);
+        assert_eq!(saves.backup, dir.path().join("saves-copies/Game"));
+        let names: Vec<&str> = saves.folders.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["Saves", "Saves_2"]);
     }
 
     #[test]
-    fn custom_backup_named_like_a_game_gets_its_own_folder() {
+    fn saves_in_the_game_folder_are_in_game() {
         let dir = TempDir::new();
-        dir.write("game/a.sav", b"a");
-        dir.write("custom/b.cfg", b"b");
-        let game = game_with_saves("shaders", vec![dir.path().join("game")]);
-        let values = [(
-            "BACKUP_shaders".to_string(),
-            dir.path().join("custom").to_string_lossy().into_owned(),
-        )];
-        let cfg = Config::from_raw(
-            dir.path().join("system/config.txt"),
-            values.into_iter().collect(),
-        );
+        assert!(saves(&dir, &game(&dir, &["games/Game/saves"])).in_game);
+        assert!(!saves(&dir, &game(&dir, &["home/.local/Game"])).in_game);
+    }
 
-        run(&[game], &cfg);
-        assert!(dir.path().join("saves-copies/shaders/a.sav").exists());
-        assert!(dir.path().join("saves-copies/shaders_2/b.cfg").exists());
+    #[test]
+    fn a_save_path_must_not_be_or_hold_a_folder_others_use() {
+        let dir = TempDir::new();
+        let game_dir = dir.mkdir("games/Game");
+        let saves_root = dir.mkdir("saves-copies");
+        let prefix = dir.path().join("pfx/drive_c");
+        let kept = kept_folders(&game_dir, &saves_root, Some(&prefix));
+        let home = paths::home_dir();
+        let user = prefix.join("users/steamuser");
+        let too_wide = |p: &Path| is_too_wide(p, &kept, &saves_root);
+        assert!(too_wide(Path::new("/")));
+        assert!(too_wide(&home));
+        assert!(too_wide(&home.join(".local/share")));
+        assert!(too_wide(&home.join("Documents")));
+        assert!(too_wide(&game_dir));
+        assert!(too_wide(&dir.path().join("games")));
+        assert!(too_wide(&saves_root.join("Other")));
+        assert!(too_wide(&user.join("AppData/Roaming")));
+        assert!(!too_wide(&home.join(".local/share/Game")));
+        assert!(!too_wide(&game_dir.join("saves")));
+        assert!(!too_wide(&user.join("AppData/Roaming/Studio/Game")));
+    }
+
+    #[test]
+    fn the_report_shows_both_sides_and_why_a_copy_cannot_be_made() {
+        let dir = TempDir::new();
+        dir.write("live/a.sav", b"12345");
+        dir.write("live/sub/b.sav", b"123");
+        let saves = saves(&dir, &game(&dir, &["live"]));
+
+        let report = report(&saves);
+        let device = report.device.unwrap();
+        assert_eq!((device.files, device.bytes), (2, 8));
+        assert_eq!(report.backup, None);
+        assert_eq!(report.cannot_back_up, None);
+        assert_eq!(report.cannot_restore.as_deref(), Some("No backup yet."));
+    }
+
+    #[test]
+    fn nothing_can_be_copied_without_a_save_path() {
+        let dir = TempDir::new();
+        let report = report(&saves(&dir, &game(&dir, &[])));
+        assert!(report.cannot_back_up.unwrap().starts_with("No save path"));
+        assert!(report.cannot_restore.unwrap().starts_with("No save path"));
+    }
+
+    #[test]
+    fn a_backup_then_a_restore_bring_the_saves_back_as_they_were() {
+        let dir = TempDir::new();
+        dir.write("one/slot1.sav", b"one");
+        dir.write("two/Saves/slot2.sav", b"two");
+        let saves = saves(&dir, &game(&dir, &["one", "two/Saves"]));
+
+        backup(&saves).unwrap();
+        assert_eq!(read(saves.backup.join("one/slot1.sav")), "one");
+        assert_eq!(read(saves.backup.join("Saves/slot2.sav")), "two");
+        let report = report(&saves);
+        assert_eq!(report.device, report.backup, "same files, same dates");
+
+        dir.write("one/slot1.sav", b"overwritten");
+        dir.write("one/extra.sav", b"new");
+        restore(&saves).unwrap();
+        assert_eq!(read(dir.path().join("one/slot1.sav")), "one");
+        assert!(!dir.path().join("one/extra.sav").exists());
+        assert_eq!(read(dir.path().join("two/Saves/slot2.sav")), "two");
+    }
+
+    #[test]
+    fn a_new_backup_replaces_the_previous_one_and_leaves_nothing_hidden() {
+        let dir = TempDir::new();
+        dir.write("live/new.sav", b"new");
+        dir.write("saves-copies/Game/live/old.sav", b"old");
+        dir.write("saves-copies/.Game.part/live/half.sav", b"interrupted");
+        let saves = saves(&dir, &game(&dir, &["live"]));
+
+        backup(&saves).unwrap();
+        assert_eq!(read(saves.backup.join("live/new.sav")), "new");
+        assert!(!saves.backup.join("live/old.sav").exists());
+        assert_eq!(
+            paths::sorted_entries(&dir.path().join("saves-copies")),
+            ["Game"]
+        );
     }
 
     #[cfg(unix)]
     #[test]
-    fn back_to_one_save_path_replaces_the_folder_of_links_with_a_link() {
+    fn a_failed_backup_keeps_the_previous_one() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = TempDir::new();
-        let saves = dir.mkdir("live/saves");
-        let root = dir.mkdir("saves-links");
-        dir.mkdir("saves-links/Game");
-        std::os::unix::fs::symlink(&saves, root.join("Game/saves")).unwrap();
-        std::os::unix::fs::symlink(dir.mkdir("live/old"), root.join("Game/old")).unwrap();
-        let entry = LinkEntry {
-            top: "Game".into(),
-            sub: None,
-            source: saves.clone(),
+        dir.write("live/a.sav", b"a");
+        let unreadable = dir.path().join("live/b.sav");
+        dir.write("live/b.sav", b"b");
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&unreadable).is_ok() {
+            return; // running as root: every file is readable
+        }
+        dir.write("saves-copies/Game/live/a.sav", b"previous");
+        let saves = saves(&dir, &game(&dir, &["live"]));
+
+        let error = backup(&saves).unwrap_err();
+        assert!(error.contains("previous one is kept"), "{error}");
+        assert_eq!(read(saves.backup.join("live/a.sav")), "previous");
+        assert_eq!(
+            paths::sorted_entries(&dir.path().join("saves-copies")),
+            ["Game"]
+        );
+    }
+
+    #[test]
+    fn backing_up_no_saves_is_refused_and_keeps_the_previous_backup() {
+        let dir = TempDir::new();
+        dir.mkdir("live");
+        dir.write("saves-copies/Game/live/a.sav", b"previous");
+        let saves = saves(&dir, &game(&dir, &["live"]));
+
+        assert_eq!(backup(&saves).unwrap_err(), "No saves to back up yet.");
+        assert_eq!(read(saves.backup.join("live/a.sav")), "previous");
+        assert_eq!(
+            paths::sorted_entries(&dir.path().join("saves-copies")),
+            ["Game"]
+        );
+    }
+
+    #[test]
+    fn a_restore_creates_a_missing_save_folder() {
+        let dir = TempDir::new();
+        dir.write("saves-copies/Game/Saves/a.sav", b"a");
+        let saves = saves(&dir, &game(&dir, &["home/Studio/Saves"]));
+
+        restore(&saves).unwrap();
+        assert_eq!(read(dir.path().join("home/Studio/Saves/a.sav")), "a");
+    }
+
+    #[test]
+    fn a_restore_leaves_save_folders_without_a_backup_alone() {
+        let dir = TempDir::new();
+        dir.write("saves-copies/Game/one/a.sav", b"a");
+        dir.write("two/keep.sav", b"keep");
+        let saves = saves(&dir, &game(&dir, &["one", "two"]));
+
+        restore(&saves).unwrap();
+        assert_eq!(read(dir.path().join("one/a.sav")), "a");
+        assert_eq!(read(dir.path().join("two/keep.sav")), "keep");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_restore_keeps_a_save_folder_that_is_a_link() {
+        let dir = TempDir::new();
+        let elsewhere = dir.mkdir("sdcard/Saves");
+        dir.write("sdcard/Saves/old.sav", b"old");
+        std::os::unix::fs::symlink(&elsewhere, dir.path().join("Saves")).unwrap();
+        dir.write("saves-copies/Game/Saves/a.sav", b"a");
+        let saves = saves(&dir, &game(&dir, &["Saves"]));
+
+        restore(&saves).unwrap();
+        assert!(paths::is_symlink(&dir.path().join("Saves")));
+        assert_eq!(read(elsewhere.join("a.sav")), "a");
+        assert!(!elsewhere.join("old.sav").exists());
+    }
+
+    #[test]
+    fn packaged_games_neither_back_up_nor_restore() {
+        let dir = TempDir::new();
+        dir.write("saves-copies/Game/saves/a.sav", b"a");
+        let mut game = game(&dir, &["games/Game/saves"]);
+        game.install = Install::Packaged {
+            package: dir.path().join("games/Game.cartridge.tar"),
+        };
+        let saves = saves(&dir, &game);
+
+        assert!(restore(&saves).unwrap_err().starts_with("Packaged game"));
+        assert!(backup(&saves).unwrap_err().starts_with("Packaged game"));
+        assert!(!dir.path().join("games/Game").exists());
+    }
+
+    #[test]
+    fn an_interrupted_backup_gets_its_previous_backup_back() {
+        let dir = TempDir::new();
+        dir.write("saves-copies/.Game.old/live/a.sav", b"previous");
+        dir.write("saves-copies/.Game.part/live/a.sav", b"half");
+        let saves = saves(&dir, &game(&dir, &["live"]));
+
+        recover(&saves).unwrap();
+        assert_eq!(read(saves.backup.join("live/a.sav")), "previous");
+        assert_eq!(report(&saves).backup.map(|s| s.files), Some(1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copies_keep_empty_folders_and_leave_links_alone() {
+        let dir = TempDir::new();
+        dir.write("live/a.sav", b"a");
+        dir.mkdir("live/empty");
+        std::os::unix::fs::symlink(dir.mkdir("elsewhere"), dir.path().join("live/cloud")).unwrap();
+        std::os::unix::fs::symlink("/nowhere", dir.path().join("live/broken")).unwrap();
+        let saves = saves(&dir, &game(&dir, &["live"]));
+
+        backup(&saves).unwrap();
+        assert!(saves.backup.join("live/empty").is_dir());
+        assert!(!saves.backup.join("live/cloud").exists());
+        std::fs::remove_dir(dir.path().join("live/empty")).unwrap();
+        restore(&saves).unwrap();
+        assert!(dir.path().join("live/empty").is_dir());
+        assert!(paths::is_symlink(&dir.path().join("live/cloud")));
+        assert!(paths::is_symlink(&dir.path().join("live/broken")));
+    }
+
+    #[test]
+    fn proton_saves_wait_for_the_prefix() {
+        let dir = TempDir::new();
+        dir.write("saves-copies/Game/Saves/a.sav", b"a");
+        let prefix = dir.path().join("compatdata/1/pfx/drive_c");
+        let saves = Saves {
+            prefix: Some(prefix.clone()),
+            ..saves(&dir, &game(&dir, &["compatdata/1/pfx/drive_c/Saves"]))
         };
 
-        build_symlink_tree(&[entry], &root);
-        assert_eq!(std::fs::read_link(root.join("Game")).unwrap(), saves);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_folder_holding_real_files_is_never_replaced_or_removed() {
-        let dir = TempDir::new();
-        let saves = dir.mkdir("live/saves");
-        let root = dir.mkdir("saves-links");
-        dir.write("saves-links/Game/mine.txt", b"keep");
-        dir.write("saves-links/Gone/mine.txt", b"keep");
-        let entry = LinkEntry {
-            top: "Game".into(),
-            sub: None,
-            source: saves,
-        };
-
-        build_symlink_tree(&[entry], &root);
-        assert!(root.join("Game/mine.txt").is_file());
-        assert!(root.join("Gone/mine.txt").is_file());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_removed_game_with_several_save_paths_loses_its_folder_of_links() {
-        let dir = TempDir::new();
-        let root = dir.mkdir("saves-links");
-        dir.mkdir("saves-links/Gone");
-        std::os::unix::fs::symlink(dir.mkdir("live/a"), root.join("Gone/a")).unwrap();
-
-        build_symlink_tree(&[], &root);
-        assert!(!root.join("Gone").exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn second_save_path_replaces_the_game_link_with_a_folder() {
-        let dir = TempDir::new();
-        let first = dir.mkdir("live/first");
-        let second = dir.mkdir("live/second");
-        let root = dir.mkdir("saves-links");
-        std::os::unix::fs::symlink(&first, root.join("Game")).unwrap();
-        let entries = [&first, &second].map(|source| LinkEntry {
-            top: "Game".into(),
-            sub: source.file_name().map(|n| n.to_string_lossy().into_owned()),
-            source: source.clone(),
-        });
-
-        build_symlink_tree(&entries, &root);
-        assert!(!paths::is_symlink(&root.join("Game")));
-        assert_eq!(
-            std::fs::read_link(root.join("Game/second")).unwrap(),
-            second
-        );
-        assert_eq!(paths::sorted_entries(&first), Vec::<String>::new());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn the_last_link_goes_once_no_game_has_save_paths() {
-        let dir = TempDir::new();
-        dir.mkdir("saves-links");
-        let link = dir.path().join("saves-links/Gone");
-        std::os::unix::fs::symlink(dir.mkdir("live/saves"), &link).unwrap();
-        let cfg = Config::from_raw(dir.path().join("system/config.txt"), Default::default());
-
-        run(&[game_with_saves("No saves", Vec::new())], &cfg);
-        assert!(!paths::is_symlink(&link));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn run_backs_up_games_and_builds_symlinks() {
-        let dir = TempDir::new();
-        let saves = dir.mkdir("live/saves");
-        dir.write("live/saves/a.sav", b"a");
-        let mut game = Game {
-            title: "My Game".into(),
-            ..Default::default()
-        };
-        game.resolved_save_paths = vec![saves.clone()];
-        dir.mkdir("saves-links");
-        std::os::unix::fs::symlink(&saves, dir.path().join("saves-links/Stale")).unwrap();
-        let cfg = Config::from_raw(dir.path().join("system/config.txt"), Default::default());
-
-        run(&[game], &cfg);
-        assert_eq!(
-            std::fs::read(dir.path().join("saves-copies/My_Game/a.sav")).unwrap(),
-            b"a"
-        );
-        assert_eq!(
-            std::fs::read_link(dir.path().join("saves-links/My_Game")).unwrap(),
-            saves
-        );
-        assert!(!dir.path().join("saves-links/Stale").exists());
+        assert!(restore(&saves)
+            .unwrap_err()
+            .starts_with("Launch the game once"));
+        std::fs::create_dir_all(&prefix).unwrap();
+        restore(&saves).unwrap();
+        assert_eq!(read(prefix.join("Saves/a.sav")), "a");
     }
 }

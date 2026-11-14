@@ -74,12 +74,12 @@ impl Progress {
         self.cancelled.load(Ordering::Relaxed)
     }
 
-    fn start(&self, total: u64) {
+    pub fn start(&self, total: u64) {
         self.total.store(total, Ordering::Relaxed);
         self.done.store(0, Ordering::Relaxed);
     }
 
-    fn advance(&self, bytes: u64) {
+    pub fn advance(&self, bytes: u64) {
         self.done.fetch_add(bytes, Ordering::Relaxed);
     }
 }
@@ -495,7 +495,7 @@ pub fn read_data_file(package: &Path, file_name: &str) -> Option<Vec<u8>> {
 
 /// `root/rel`, refusing anything that could land outside `root`: non-plain
 /// components, or a parent that is a symlink (written by an earlier entry).
-fn safe_join(root: &Path, rel: &Path) -> Result<PathBuf, String> {
+pub(crate) fn safe_join(root: &Path, rel: &Path) -> Result<PathBuf, String> {
     let plain = rel.components().all(|c| matches!(c, Component::Normal(_)));
     let through_symlink = rel
         .ancestors()
@@ -520,12 +520,12 @@ fn set_mode(_path: &Path, _mode: u32) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn make_symlink(target: &Path, link: &Path) -> io::Result<()> {
+pub(crate) fn make_symlink(target: &Path, link: &Path) -> io::Result<()> {
     std::os::unix::fs::symlink(target, link)
 }
 
 #[cfg(not(unix))]
-fn make_symlink(target: &Path, link: &Path) -> io::Result<()> {
+pub(crate) fn make_symlink(target: &Path, link: &Path) -> io::Result<()> {
     log::warn!(
         "Skipping symlink {} -> {}",
         link.display(),

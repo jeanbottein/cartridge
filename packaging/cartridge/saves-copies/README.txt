@@ -1,2 +1,2 @@
-Backups of your save files, made by the pipeline (STATUS tab, or
-`cartridge -g backup`). One folder per game.
+Backups of your save files: <game folder>/<save folder>/. Make or restore
+them one game at a time in the app's SAVES tab.

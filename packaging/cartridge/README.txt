@@ -12,17 +12,17 @@ label in the app and in Steam.
   games/          one folder per game
   mods/           patches and file replacements
   saves-copies/   backups of your save files
-  saves-links/    links to the live save folders (for Syncthing & co)
+  saves-links/    for links to the live save folders (not built for now)
 
 START
-  Launch the app. Add games to games/, then run the pipeline from the
-  STATUS tab: it finds each game's executable, fetches artwork and (if you
-  enable it in SETTINGS) adds the games to Steam.
+  Launch the app and put each game in its own folder in games/: the app
+  finds its executable and fetches its artwork by itself, at launch and as
+  soon as a copy is done. Press Y on a game in the LIBRARY to add it to Steam.
 
 STEAM ARTWORK FOR THE CARTRIDGE
-  With "Add •cartridge to Steam" on, the cartridge appears in Steam under its
-  label. Drop cover.png, wide.png, hero.png, logo.png or icon.png into
-  system/ to use your own images; the next pipeline run installs them.
+  With "Add <folder name> to Steam" on (SETTINGS), the cartridge appears in
+  Steam under its label. Drop cover.png, wide.png, hero.png, logo.png or
+  icon.png into system/ to use your own images; the next launch installs them.
 
 KEEP IT TOGETHER
   The app looks for system/ right next to itself. Keep them in the same

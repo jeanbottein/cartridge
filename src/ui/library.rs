@@ -4,6 +4,7 @@
 //! background and are drawn over the presented canvas, at the window's resolution.
 
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
 
 use macroquad::prelude::*;
@@ -18,6 +19,7 @@ use super::style::{self, Toast};
 use super::{draw_spinner, Hint, Ui};
 use crate::core::config::Config;
 use crate::core::models::{Game, Install};
+use crate::core::pipeline::Phase;
 use crate::core::proton::Downloads;
 use crate::core::scanner;
 use crate::core::{sizer, steam};
@@ -49,7 +51,10 @@ pub struct Library {
     steam_detected: bool,
     /// Where winetricks downloads go, for Windows games.
     downloads: Downloads,
+    /// Textures of the covers around the cursor (`covers::cover_window`).
     covers: Vec<Option<Texture2D>>,
+    /// Covers asked for (loaded, loading or without image) and still in the window.
+    requested: BTreeSet<usize>,
     loader: Option<ImageLoader>,
     cursor: usize,
     /// When the cursor landed on its game: its long title scrolls from then.
@@ -61,7 +66,7 @@ pub struct Library {
     /// until it arrives (events keep pointing at the games on screen).
     pending: Option<Receiver<Snapshot>>,
     /// Where cover thumbnails are cached.
-    thumbs_dir: std::path::PathBuf,
+    thumbs_dir: PathBuf,
 }
 
 /// What a load reads from disk, built off the UI thread: scanning reads
@@ -100,6 +105,24 @@ impl Snapshot {
     }
 }
 
+/// A fake library update for the progress card (Settings > DEBUG), looping
+/// with `time`: the card's look, with nothing running. (label, progress 0..1)
+pub fn demo_progress(time: f64) -> (String, f32) {
+    const PERIOD: f64 = 6.0;
+    const GAMES: usize = 200;
+    const PHASES: [Phase; 5] = [
+        Phase::Scan,
+        Phase::Detect,
+        Phase::Measure,
+        Phase::Enrich,
+        Phase::SteamExport,
+    ];
+    let fraction = (time.rem_euclid(PERIOD) / PERIOD) as f32;
+    let phase = PHASES[((fraction * PHASES.len() as f32) as usize).min(PHASES.len() - 1)];
+    let done = (fraction * GAMES as f32) as usize / 10 * 10;
+    (format!("Demo · {} {done}/{GAMES}", phase.label()), fraction)
+}
+
 /// Where the cursor goes in a new list: on the game it was on, if still there.
 fn cursor_in(games: &[Game], focused: Option<&str>) -> usize {
     focused
@@ -125,10 +148,9 @@ impl Library {
         let focused = self.games.get(self.cursor).map(|g| g.folder_name.clone());
         self.cursor = cursor_in(&snapshot.games, focused.as_deref());
         self.covers = vec![None; snapshot.games.len()];
-        self.loader = Some(ImageLoader::spawn(covers::cover_jobs(
-            &snapshot.games,
-            &self.thumbs_dir,
-        )));
+        self.requested.clear();
+        self.loader = None;
+        let _ = std::fs::create_dir_all(&self.thumbs_dir);
         self.games = snapshot.games;
         self.package_sizes = snapshot.package_sizes;
         self.in_steam = snapshot.in_steam;
@@ -141,22 +163,65 @@ impl Library {
         self.pending.is_some() && self.games.is_empty()
     }
 
-    /// Show a finished load, and upload covers decoded since the last frame.
+    /// Show a finished load, upload covers decoded since the last frame, and
+    /// keep only the covers around the cursor.
     pub fn poll(&mut self) {
         if let Some(snapshot) = self.pending.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.pending = None;
             self.apply(snapshot);
         }
-        let Some(loader) = &mut self.loader else {
-            return;
-        };
-        for (index, tex) in loader.poll() {
-            if let Some(slot) = self.covers.get_mut(index) {
-                *slot = Some(tex);
+        if let Some(loader) = &mut self.loader {
+            for (index, tex) in loader.poll() {
+                // A cover that left the window while decoding is dropped.
+                if let Some(slot) = self
+                    .covers
+                    .get_mut(index)
+                    .filter(|_| self.requested.contains(&index))
+                {
+                    *slot = Some(tex);
+                }
+            }
+            if !loader.loading() {
+                self.loader = None;
             }
         }
-        if !loader.loading() {
+        self.sync_covers();
+    }
+
+    /// Free the covers that left the window; once the loader is idle, load
+    /// the ones that entered it.
+    fn sync_covers(&mut self) {
+        let window = covers::cover_window(self.cursor, self.games.len());
+        let outside: Vec<usize> = self
+            .requested
+            .iter()
+            .copied()
+            .filter(|i| !window.contains(i))
+            .collect();
+        for index in outside {
+            self.requested.remove(&index);
+            self.covers[index] = None;
+        }
+        // Scrolling fast: a batch still decoding covers for the part of the
+        // list the cursor left stops, so the focused cover doesn't wait.
+        if self.loader.is_some() && !self.requested.contains(&self.cursor) {
             self.loader = None;
+            self.requested.retain(|&i| self.covers[i].is_some());
+        }
+        if self.loader.is_some() {
+            return;
+        }
+        let new: Vec<usize> = window
+            .into_iter()
+            .filter(|i| !self.requested.contains(i))
+            .collect();
+        self.requested.extend(&new);
+        let jobs: Vec<covers::Job> = new
+            .into_iter()
+            .filter_map(|i| covers::cover_job(&self.games[i], i, &self.thumbs_dir))
+            .collect();
+        if !jobs.is_empty() {
+            self.loader = Some(ImageLoader::spawn(jobs));
         }
     }
 
@@ -202,8 +267,9 @@ impl Library {
             self.focused_at = get_time();
         }
         if nav {
-            let top = self.cursor as f32 * ROW_STEP;
-            self.scroll_target = self.scroll_target.min(top).max(top + ROW_H - list.h);
+            // The focused game stays in the middle; the clamp below stops
+            // the list at its first and last games.
+            self.scroll_target = self.cursor as f32 * ROW_STEP + ROW_H / 2.0 - list.h / 2.0;
         }
         self.scroll_target = self.scroll_target.clamp(0.0, self.max_scroll(list));
         let t = (get_frame_time() * 14.0).min(1.0);
@@ -248,7 +314,8 @@ impl Library {
         }
     }
 
-    pub fn draw(&self, ui: &Ui, area: Rect, jobs: &Jobs) {
+    /// `update`: the library update running (label, progress 0..1).
+    pub fn draw(&self, ui: &Ui, area: Rect, jobs: &Jobs, update: Option<(&str, f32)>) {
         if self.first_load() {
             draw_spinner(area.x + 6.0, area.y + 24.0, 6.0, theme::accent());
             ui.text(
@@ -263,7 +330,7 @@ impl Library {
             ui.text("No games found.", area.x, area.y + 30.0, theme::text());
             ui.text(
                 &ui.truncate(
-                    "Put each game in its own folder in games/, then run the pipeline in STATUS.",
+                    "Put each game in its own folder in games/: it shows up here by itself.",
                     area.w,
                 ),
                 area.x,
@@ -295,6 +362,9 @@ impl Library {
             );
         }
         self.draw_loading(ui, list);
+        if let Some((label, fraction)) = update {
+            style::progress_card(ui, list, label, fraction);
+        }
         self.toast.draw(ui, list);
     }
 
@@ -377,16 +447,16 @@ impl Library {
         (text, color)
     }
 
-    /// Install state and sizes of the focused game, e.g. `Installed · 1.2 GB`.
+    /// Size of the focused game, e.g. `1.2 GB`; a package says so (`Packaged · 1.1 GB`).
     fn install_line(&self) -> String {
         let game = &self.games[self.cursor];
         let size = |s: Option<u64>| s.map_or("? B".to_string(), sizer::human);
         let package = size(self.package_sizes[self.cursor]);
         match &game.install {
-            Install::Installed => format!("Installed · {}", size(game.size)),
+            Install::Installed => size(game.size),
             Install::Packaged { .. } => format!("Packaged · {package}"),
             Install::InstalledWithPackage { verified, .. } => format!(
-                "Installed {} + Package {package}{}",
+                "{} + Package {package}{}",
                 size(game.size),
                 if *verified { "" } else { " (different)" }
             ),
@@ -453,6 +523,15 @@ mod tests {
             .iter()
             .map(|n| Game::skeleton(std::path::Path::new(n)))
             .collect()
+    }
+
+    #[test]
+    fn the_demo_progress_loops_and_says_it_is_a_demo() {
+        let (label, start) = demo_progress(0.0);
+        assert_eq!((label.as_str(), start), ("Demo · Scanning 0/200", 0.0));
+        let (label, middle) = demo_progress(3.0);
+        assert_eq!((label.as_str(), middle), ("Demo · Size 100/200", 0.5));
+        assert_eq!(demo_progress(6.0 + 3.0), demo_progress(3.0));
     }
 
     #[test]

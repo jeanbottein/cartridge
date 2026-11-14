@@ -1,5 +1,5 @@
 //! MODS: every mod under `mods/` with its target games and status. A turns
-//! the focused mod on (applied, kept applied by the pipeline) or off
+//! the focused mod on (applied, kept applied by the autopilot) or off
 //! (originals restored); mods that can't be used say why. Listing reads game
 //! files' checksums and toggling patches them, so both run on a thread.
 

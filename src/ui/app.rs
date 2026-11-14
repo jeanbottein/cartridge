@@ -10,6 +10,7 @@ use macroquad::prelude::*;
 use super::dialog::{Dialog, Outcome as DialogOutcome};
 use super::editor::{self, Editor};
 use super::engine::canvas::Widescreen;
+use super::engine::icon::{self, Icon};
 use super::engine::input::Action;
 use super::engine::shape::fill_rounded;
 use super::engine::text::Fonts;
@@ -20,16 +21,18 @@ use super::library::{self, Library};
 use super::mods::ModsScreen;
 use super::music::{self, Music};
 use super::network::{self, Network};
+use super::saves::SavesScreen;
 use super::settings::Settings;
 use super::setup::{self, Setup};
-use super::status::Status;
+use super::updates::{self, UpdatesScreen};
 use super::{style, wants_fullscreen, Hint, Ui};
-use crate::core::app::{exe_dir, find_system_dir};
+use crate::core::app::{debug_mode, exe_dir, find_system_dir};
+use crate::core::autopilot::Autopilot;
 use crate::core::config::{self, Config};
 use crate::core::logging::{self, Line};
 use crate::core::share::{self, client, server::Server};
 use crate::core::{init, migrations};
-use crate::core::{package, steam, steam_self};
+use crate::core::{package, steam, steam_self, updater};
 
 const MARGIN: f32 = 16.0;
 const HEADER_H: f32 = 36.0;
@@ -39,8 +42,20 @@ const CONTENT_TOP: f32 = HEADER_H + LINE_GAP;
 const FOOTER_H: f32 = 28.0;
 /// Footer badges, from the footer line.
 const BADGE_TOP: f32 = 7.0;
-/// Room around a tab's name in the header.
+/// Room around a tab's icon (and name, when it is the current tab) in the header.
 const TAB_PAD: f32 = 7.0;
+/// Between a tab's icon and its name.
+const ICON_GAP: f32 = 6.0;
+
+/// Settings the autopilot uses: changing one runs it again.
+const RUN_ON_CHANGE: [&str; 6] = [
+    "STEAM_USERID",
+    "STEAMGRIDDB_API_KEY",
+    "STEAMGRIDDB_NSFW",
+    "STEAMGRIDDB_HUMOR",
+    "STEAMGRIDDB_EPILEPSY",
+    "MANIFEST_EXPORT",
+];
 
 /// Holding Back this long on the Library quits the app.
 const HOLD_TO_QUIT_SECS: f64 = 1.0;
@@ -51,23 +66,36 @@ const RESUME_GRACE_SECS: f64 = 0.6;
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
     Library,
-    Network,
     Mods,
-    Status,
+    Saves,
+    Updates,
+    Network,
     Settings,
 }
 
-const TABS: [(Tab, &str); 5] = [
-    (Tab::Library, "LIBRARY"),
-    (Tab::Network, "NETWORK"),
-    (Tab::Mods, "MODS"),
-    (Tab::Status, "STATUS"),
-    (Tab::Settings, "SETTINGS"),
+/// The header shows every tab's icon, and the current tab's name beside it.
+const TABS: [(Tab, &str, Icon); 6] = [
+    (Tab::Library, "LIBRARY", Icon::Library),
+    (Tab::Mods, "MODS", Icon::Mods),
+    (Tab::Saves, "SAVES", Icon::Saves),
+    (Tab::Updates, "UPDATES", Icon::Updates),
+    (Tab::Network, "NETWORK", Icon::Network),
+    (Tab::Settings, "SETTINGS", Icon::Settings),
+];
+
+/// Keyboard shortcuts to each tab, in `TABS` order.
+const TAB_KEYS: [KeyCode; 6] = [
+    KeyCode::Key1,
+    KeyCode::Key2,
+    KeyCode::Key3,
+    KeyCode::Key4,
+    KeyCode::Key5,
+    KeyCode::Key6,
 ];
 
 impl Tab {
     fn index(self) -> usize {
-        TABS.iter().position(|(t, _)| *t == self).unwrap_or(0)
+        TABS.iter().position(|(t, ..)| *t == self).unwrap_or(0)
     }
 
     fn step(self, delta: isize) -> Tab {
@@ -84,11 +112,14 @@ pub struct App {
     fullscreen: bool,
     library: Library,
     network: Network,
+    saves: SavesScreen,
     mods: ModsScreen,
-    /// File transfers running in the background (unpack, pack, copies).
+    updates: UpdatesScreen,
+    /// File transfers running in the background (unpack, pack, copies, updates).
     jobs: Jobs,
     editor: Option<Editor>,
-    status: Status,
+    /// Keeps the library up to date (pipeline at launch and on folder changes).
+    autopilot: Option<Autopilot>,
     settings: Option<Settings>,
     logs: Receiver<Line>,
     /// The game currently running; UI input is suspended while it plays.
@@ -98,6 +129,8 @@ pub struct App {
     server: Option<Server>,
     /// Background music, once `MUSIC_ENABLED` was on and there are tracks.
     music: Option<Music>,
+    /// game.json files the autopilot's run in progress wrote, as last shown.
+    written_seen: usize,
     /// Steam shortcuts were added or removed: offer to restart Steam on quit.
     steam_changed: bool,
     /// "Restart Steam?" before quitting.
@@ -120,16 +153,19 @@ impl App {
             fullscreen,
             library: Library::default(),
             network: Network::default(),
+            saves: SavesScreen::default(),
             mods: ModsScreen::default(),
+            updates: UpdatesScreen::default(),
             jobs: Jobs::default(),
             editor: None,
-            status: Status::new(),
+            autopilot: None,
             settings: None,
             logs,
             session: None,
             input_resume_at: 0.0,
             server: None,
             music: None,
+            written_seen: 0,
             steam_changed: false,
             quit_dialog: None,
             back_held_over: false,
@@ -152,6 +188,7 @@ impl App {
         if let Some(dir) = cfg.games_dir() {
             migrations::run_all(&dir);
         }
+        self.autopilot = Some(Autopilot::start(cfg.clone()));
         self.config = Some(cfg);
         // The theme first: screens built below keep some of its colors.
         self.apply_theme();
@@ -251,7 +288,7 @@ impl App {
             .ok();
     }
 
-    /// Re-read `config.txt` (after Settings changed it or a pipeline run).
+    /// Re-read `config.txt` (after Settings changed it).
     fn reload_config(&mut self) {
         let Some(path) = self.config.as_ref().map(|c| c.path.clone()) else {
             return;
@@ -259,6 +296,9 @@ impl App {
         let cfg = Config::load(&path);
         if let Some(settings) = &mut self.settings {
             settings.refresh(&cfg);
+        }
+        if let Some(autopilot) = &self.autopilot {
+            autopilot.set_config(cfg.clone());
         }
         self.config = Some(cfg);
         self.sync_server();
@@ -291,20 +331,17 @@ impl App {
         if is_quit_requested() && self.quit_dialog.is_none() {
             self.request_quit();
         }
-        while let Ok(line) = self.logs.try_recv() {
-            self.status.push_log(line);
-        }
+        self.toast_problems();
         self.library.poll();
         self.network.poll(self.config.as_ref());
         self.mods.poll(self.config.as_ref());
+        self.saves.poll();
+        self.updates.poll();
         if let Some(music) = &mut self.music {
             music.update(get_frame_time(), self.session.is_some());
         }
         self.collect_jobs();
-        if self.status.poll().is_some() {
-            self.reload_config();
-            self.reload_library();
-        }
+        self.collect_runs();
 
         if let Some(ended) = self.session.take_if(|s| !s.running()) {
             if let Some(message) = ended.error() {
@@ -341,6 +378,50 @@ impl App {
         self.draw();
     }
 
+    /// Warnings and errors logged anywhere (the details are in the terminal
+    /// or the journal).
+    fn toast_problems(&mut self) {
+        while let Ok(line) = self.logs.try_recv() {
+            let color = match line.level {
+                log::Level::Error => theme::danger(),
+                log::Level::Warn => theme::secondary(),
+                _ => continue,
+            };
+            self.library.toast.show(line.text.trim(), color);
+        }
+    }
+
+    /// Show what the autopilot changed: the library is reloaded when a batch
+    /// of games was written and when a run that changed games ends. Pause it
+    /// while a game plays, the editor is open or a game updates (it must not
+    /// write the game being edited or updated).
+    fn collect_runs(&mut self) {
+        let Some(autopilot) = &self.autopilot else {
+            return;
+        };
+        let updating = self.jobs.running().iter().any(|j| j.kind == Kind::Update);
+        autopilot.set_paused(self.session.is_some() || self.editor.is_some() || updating);
+        let written = autopilot.progress().map_or(0, |step| step.written);
+        let runs = autopilot.finished();
+        let batch_written = written > self.written_seen;
+        self.written_seen = written; // back to 0 once idle
+        self.steam_changed |= runs.iter().any(|run| run.steam_changed);
+        if batch_written || runs.iter().any(|run| run.games_changed) {
+            self.reload_library();
+        }
+    }
+
+    fn updating(&self) -> bool {
+        self.autopilot.as_ref().is_some_and(Autopilot::is_running)
+    }
+
+    /// Ask for a run: a change the folder listing doesn't show.
+    fn request_run(&self) {
+        if let Some(autopilot) = &self.autopilot {
+            autopilot.request_run();
+        }
+    }
+
     /// Toast finished transfers and show their result in both lists.
     fn collect_jobs(&mut self) {
         let finished = self.jobs.poll();
@@ -348,6 +429,10 @@ impl App {
             return;
         }
         self.reload_library();
+        // An update changes files inside a game folder, which the watcher
+        // doesn't see: a run measures the size, restores exec bits and
+        // re-applies the mods the user turned on.
+        self.request_run();
         let games_dir = self.config.as_ref().and_then(Config::games_dir);
         self.network.recheck_local(games_dir.as_deref());
         for done in finished {
@@ -358,6 +443,7 @@ impl App {
             };
             self.library.toast.show(&done.message, color);
             self.network.toast.show(&done.message, color);
+            self.updates.toast.show(&done.message, color);
         }
     }
 
@@ -365,6 +451,8 @@ impl App {
         self.quit_dialog.is_some()
             || self.editor.is_some()
             || self.network.has_modal()
+            || self.saves.has_modal()
+            || self.updates.has_modal()
             || self.setup.is_some()
             || self.settings.as_ref().is_some_and(Settings::has_modal)
     }
@@ -379,20 +467,19 @@ impl App {
         if self.modal_open() {
             return;
         }
+        let before = self.tab;
+        self.switch_tabs();
+        if self.tab == Tab::Saves && before != Tab::Saves {
+            self.saves.forget(); // a game may have saved since
+        }
+    }
+
+    fn switch_tabs(&mut self) {
         if self.tab != Tab::Library && self.ui.action(Action::Back) {
             self.tab = Tab::Library;
             self.back_held_over = true; // the same press must not count toward hold-to-quit
         }
-        for (key, (tab, _)) in [
-            KeyCode::Key1,
-            KeyCode::Key2,
-            KeyCode::Key3,
-            KeyCode::Key4,
-            KeyCode::Key5,
-        ]
-        .iter()
-        .zip(TABS)
-        {
+        for (key, (tab, ..)) in TAB_KEYS.iter().zip(TABS) {
             if is_key_pressed(*key) {
                 self.tab = tab;
             }
@@ -463,12 +550,17 @@ impl App {
         match self.tab {
             Tab::Library => self.update_library(area),
             Tab::Network => self.update_network(area),
+            Tab::Updates => self.update_updates(area),
+            Tab::Saves => {
+                if let Some(cfg) = &self.config {
+                    self.saves.update(&self.ui, area, &self.library.games, cfg);
+                }
+            }
             Tab::Mods => {
                 if let Some(cfg) = &self.config {
                     self.mods.update(&self.ui, area, cfg);
                 }
             }
-            Tab::Status => self.status.update(&self.ui, area, self.config.as_ref()),
             Tab::Settings => {
                 let (Some(settings), Some(cfg)) = (&mut self.settings, &self.config) else {
                     return;
@@ -483,6 +575,7 @@ impl App {
                     "WIDESCREEN" => self.apply_widescreen(),
                     "THEME" => self.apply_theme(),
                     "WINDOW_MODE" => self.apply_window_mode(),
+                    key if RUN_ON_CHANGE.contains(&key) => self.request_run(),
                     _ => {}
                 }
             }
@@ -496,7 +589,10 @@ impl App {
                     self.editor = None;
                     self.back_held_over = true;
                 }
-                Some(editor::Event::Saved) => self.reload_library(),
+                Some(editor::Event::Saved) => {
+                    self.reload_library();
+                    self.request_run(); // e.g. a new title for its Steam shortcut
+                }
                 Some(editor::Event::Pack) => {
                     let id = editor.folder_name().to_string();
                     self.editor = None;
@@ -558,7 +654,7 @@ impl App {
         });
     }
 
-    /// "<folder name> in Steam" changed: add or remove the self-shortcut now.
+    /// "Add <folder name> to Steam" changed: add or remove the self-shortcut now.
     fn apply_self_shortcut(&mut self) {
         let Some(cfg) = &self.config else { return };
         let adding = cfg.is_true("STEAM_ADD_SELF");
@@ -577,6 +673,13 @@ impl App {
 
     /// Add the game to Steam or take it out, now.
     fn toggle_steam(&mut self, index: usize) {
+        if steam::files_busy() {
+            // The autopilot is writing them: don't freeze the UI waiting.
+            self.library
+                .toast
+                .show("Steam is being updated, one moment...", theme::secondary());
+            return;
+        }
         let (Some(cfg), Some(game)) = (&self.config, self.library.games.get(index)) else {
             return;
         };
@@ -602,6 +705,41 @@ impl App {
         };
         self.reload_library();
         self.library.toast.show(&message, color);
+    }
+
+    /// Updates write game.json: only while the autopilot doesn't (its
+    /// persister would put back what it read before), and paused at once.
+    fn update_updates(&mut self, area: Rect) {
+        let Some(event) = self
+            .updates
+            .update(&self.ui, area, &self.library.games, &self.jobs)
+        else {
+            return;
+        };
+        if self.updating() {
+            let wait = "The library is being updated, one moment...";
+            self.updates.toast.show(wait, theme::secondary());
+            return;
+        }
+        match event {
+            updates::Event::Install { game, asset, tag } => {
+                if let Some(autopilot) = &self.autopilot {
+                    autopilot.set_paused(true);
+                }
+                let (id, title) = (game.folder_name.clone(), game.title.clone());
+                self.jobs.start(Kind::Update, &id, &title, move |p| {
+                    updater::install(&game, &asset, &tag, p)
+                });
+            }
+            updates::Event::MarkInstalled { game, tag } => {
+                let (message, color) = match updater::mark_installed(&game, &tag) {
+                    Ok(()) => (format!("{}: {tag} installed", game.title), theme::accent()),
+                    Err(e) => (e, theme::danger()),
+                };
+                self.updates.toast.show(&message, color);
+                self.reload_library();
+            }
+        }
     }
 
     fn update_network(&mut self, area: Rect) {
@@ -650,13 +788,21 @@ impl App {
         match (&self.setup, self.tab, &self.editor) {
             (Some(setup), _, _) => setup.draw(&self.ui, area),
             (None, Tab::Library, Some(editor)) => editor.draw(&self.ui, area),
-            (None, Tab::Library, None) => self.library.draw(&self.ui, area, &self.jobs),
+            (None, Tab::Library, None) => {
+                let update = self.update_card();
+                let update = update.as_ref().map(|(label, f)| (label.as_str(), *f));
+                self.library.draw(&self.ui, area, &self.jobs, update);
+            }
             (None, Tab::Network, _) => {
                 self.network
                     .draw(&self.ui, area, self.config.as_ref(), &self.jobs)
             }
+            (None, Tab::Saves, _) => self.saves.draw(&self.ui, area, &self.library.games),
+            (None, Tab::Updates, _) => {
+                self.updates
+                    .draw(&self.ui, area, &self.library.games, &self.jobs)
+            }
             (None, Tab::Mods, _) => self.mods.draw(&self.ui, area, self.config.as_ref()),
-            (None, Tab::Status, _) => self.status.draw(&self.ui, area, self.library.games.len()),
             (None, Tab::Settings, _) => {
                 if let Some(settings) = &self.settings {
                     settings.draw(&self.ui, area);
@@ -683,38 +829,67 @@ impl App {
         }
     }
 
+    /// The Library's progress card: the autopilot's run, else the fake loop
+    /// of debug mode (drawn only; the autopilot never sees it).
+    fn update_card(&self) -> Option<(String, f32)> {
+        let step = self.autopilot.as_ref().and_then(Autopilot::progress);
+        let fake = debug_mode()
+            && self
+                .config
+                .as_ref()
+                .is_some_and(|c| c.is_true("DEBUG_FAKE_PROGRESS"));
+        step.map(|s| (format!("Updating · {}", s.label()), s.fraction()))
+            .or_else(|| fake.then(|| library::demo_progress(get_time())))
+    }
+
     fn draw_header(&self) {
         let (w, h) = self.ui.canvas.size();
         style::backdrop(Rect::new(0.0, 0.0, w, CONTENT_TOP), h);
-        let tabs: Vec<(&str, bool)> = match &self.setup {
-            Some(_) => vec![("SETUP", true)],
-            None => TABS
-                .iter()
-                .map(|(tab, name)| (*name, *tab == self.tab))
-                .collect(),
+        let tabs_end = match &self.setup {
+            Some(_) => self.draw_tab(MARGIN, "SETUP", None, true),
+            None => TABS.iter().fold(MARGIN, |x, (tab, name, icon)| {
+                self.draw_tab(x, name, Some(*icon), *tab == self.tab)
+            }),
         };
-        let mut x = MARGIN;
-        for (name, active) in tabs {
-            let width = self.ui.measure(name);
-            if active {
-                let pill = Rect::new(x - TAB_PAD, 7.0, width + 2.0 * TAB_PAD, 22.0);
-                fill_rounded(pill, theme::current().radius, fade(theme::accent(), 0.16));
-                draw_rectangle(pill.x, pill.bottom() - 2.0, pill.w, 2.0, theme::accent());
-            }
-            let color = if active {
-                theme::accent()
-            } else {
-                theme::muted()
-            };
-            self.ui.text(name, x, 23.0, color);
-            x += width + 2.0 * TAB_PAD + 6.0;
-        }
-        self.draw_indicators(x, w);
+        self.draw_indicators(tabs_end, w);
         draw_rectangle(0.0, HEADER_H, w, 1.0, theme::border());
     }
 
+    /// One tab at `x`: its icon, plus its name in a pill when current.
+    /// Returns where the next tab starts.
+    fn draw_tab(&self, x: f32, name: &str, icon: Option<Icon>, active: bool) -> f32 {
+        let icon_w = icon.map_or(0.0, |_| icon::SIZE);
+        let name_w = match (active, icon) {
+            (false, _) => 0.0,
+            (true, None) => self.ui.measure(name),
+            (true, Some(_)) => ICON_GAP + self.ui.measure(name),
+        };
+        let width = icon_w + name_w;
+        let color = if active {
+            theme::accent()
+        } else {
+            theme::muted()
+        };
+        if active {
+            let pill = Rect::new(x - TAB_PAD, 7.0, width + 2.0 * TAB_PAD, 22.0);
+            fill_rounded(pill, theme::current().radius, fade(theme::accent(), 0.16));
+            draw_rectangle(pill.x, pill.bottom() - 2.0, pill.w, 2.0, theme::accent());
+        }
+        if let Some(icon) = icon {
+            icon::draw(icon, x, 10.0, color);
+            if icon == Icon::Updates && self.updates.has_available(&self.library.games) {
+                icon::dot(x, 10.0, theme::accent());
+            }
+        }
+        if active {
+            self.ui
+                .text(name, x + width - self.ui.measure(name), 23.0, color);
+        }
+        x + width + 2.0 * TAB_PAD + 4.0
+    }
+
     /// Right side of the header: the cartridge's name, then music muted, the
-    /// pipeline run, transfers and sharing. Stops before running into the
+    /// library update, transfers and sharing. Stops before running into the
     /// tabs (which end at `tabs_end`).
     fn draw_indicators(&self, tabs_end: f32, w: f32) {
         let mut x = w - MARGIN;
@@ -738,8 +913,8 @@ impl App {
                 indicator("MUTED", theme::secondary(), false);
             }
         }
-        if self.status.is_running() {
-            indicator("RUNNING", theme::secondary(), true);
+        if self.updating() {
+            indicator("SCANNING", theme::secondary(), true);
         }
         match self.jobs.running() {
             [] => {}
@@ -791,8 +966,15 @@ impl App {
                 });
                 hints
             }
+            (Tab::Saves, _) if self.saves.has_modal() => {
+                return self.saves.hints(ui, &self.library.games)
+            }
+            (Tab::Saves, _) => self.saves.hints(ui, &self.library.games),
+            (Tab::Updates, _) if self.updates.has_modal() => {
+                return self.updates.hints(ui, &self.library.games, &self.jobs)
+            }
+            (Tab::Updates, _) => self.updates.hints(ui, &self.library.games, &self.jobs),
             (Tab::Mods, _) => self.mods.hints(ui),
-            (Tab::Status, _) => self.status.hints(ui),
             (Tab::Settings, _) => match &self.settings {
                 Some(settings) if settings.has_modal() => return settings.hints(ui),
                 Some(settings) => settings.hints(ui),

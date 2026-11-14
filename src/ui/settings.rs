@@ -8,6 +8,7 @@ use macroquad::prelude::*;
 use super::engine::theme::{self, Tone, THEMES};
 use super::form::{Event as FormEvent, Field, Form};
 use super::{Hint, Ui};
+use crate::core::app::debug_mode;
 use crate::core::config::{self, Config};
 use crate::core::steam;
 
@@ -15,7 +16,6 @@ use crate::core::steam;
 const STEAM_KEYS: [&str; 3] = [SELF_SHORTCUT, "STEAM_USERID", "PROTON_KEEP_DOWNLOADS"];
 /// Labelled with the cartridge folder's name, as it appears in Steam.
 const SELF_SHORTCUT: &str = "STEAM_ADD_SELF";
-const STRATEGIES: &[&str] = &["backup", "sync", "restore"];
 const WIDESCREEN: &[&str] = &["auto", "on", "off"];
 const WINDOW_MODES: &[&str] = &["borderless", "window"];
 
@@ -49,10 +49,12 @@ const fn s(key: &'static str, label: &'static str, kind: Kind, help: &'static st
     }
 }
 
+/// Shown only in debug mode (`core::app::debug_mode`).
+const DEBUG_SECTION: &str = "DEBUG";
+
 const SCHEMA: [(&str, &[Setting]); 5] = [
     ("GENERAL", &[
-        s(SELF_SHORTCUT, "in Steam", Kind::Flag(false), "Add this cartridge to Steam under its folder name, with retro artwork (or your cover.png, hero.png... in system/). Applied right away."),
-        s("SAVESCOPY_STRATEGY", "Save strategy", Kind::Choice(STRATEGIES), "backup: copy saves into saves-copies/. restore: copy them back over the saves, every run (careful!)."),
+        s(SELF_SHORTCUT, "Add {} to Steam", Kind::Flag(false), "Add this cartridge to Steam under its folder name, with retro artwork (or your cover.png, hero.png... in system/). Applied right away."),
         s("MUSIC_ENABLED", "Background music", Kind::Flag(true), "Shuffle the audio files in system/ (mp3, flac, ogg, wav, m4a); fades out while a game runs. SELECT (M) turns it on and off anywhere."),
         s("MUSIC_VOLUME", "Music volume", Kind::Percent(50), "How loud the background music plays. Applied right away."),
     ]),
@@ -75,8 +77,9 @@ const SCHEMA: [(&str, &[Setting]); 5] = [
         s("SHARE_PORT", "Sharing port", Kind::Text, "TCP + UDP port (default 47800). Open it in the firewall if peers can't see this machine."),
         s("SHARE_PEERS", "Extra peers", Kind::Text, "host[:port], comma-separated: machines to list even when broadcast can't reach them."),
     ]),
-    ("DEBUG", &[
+    (DEBUG_SECTION, &[
         s("DEBUG_NO_STEAM", "Pretend Steam is missing", Kind::Flag(false), "Hide the Steam buttons and dim the Steam settings, as on a machine without Steam. Interface only."),
+        s("DEBUG_FAKE_PROGRESS", "Fake update progress", Kind::Flag(false), "Loop a fake library update in the Library's progress card, to see it. Interface only: nothing runs."),
     ]),
 ];
 
@@ -99,11 +102,12 @@ fn fields(cfg: &Config) -> Vec<Field> {
     let steam_found = steam::detected(cfg);
     SCHEMA
         .iter()
+        .filter(|(category, _)| *category != DEBUG_SECTION || debug_mode())
         .flat_map(|(category, settings)| {
             let fields = settings.iter().map(|s| {
                 let v = value(s.key);
                 let label = if s.key == SELF_SHORTCUT {
-                    format!("{} {}", cfg.label(), s.label)
+                    s.label.replace("{}", &cfg.label())
                 } else {
                     s.label.to_string()
                 };

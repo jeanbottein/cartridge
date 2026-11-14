@@ -21,6 +21,11 @@ crc32fast = "1"
 # Game packages are plain tar files (readable with `tar xf`, no •cartridge needed).
 tar = { version = "0.4", default-features = false }
 log = { version = "0.4", features = ["std"] }
+# Save dates in local time (the SAVES tab): std has no time zones.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+flate2 = "1"
+# Update archives (GitHub releases) come as .zip or .tar.gz; inflate only, through flate2.
+zip = { version = "9.5.1", default-features = false, features = ["deflate-flate2"] }
 
 [features]
 default = ["gamepad", "music"]

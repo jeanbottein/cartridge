@@ -1,9 +1,9 @@
 //! Backend: the game library model and the pipeline phases. No UI code here;
-//! both the terminal mode and the UI drive it.
+//! the UI and the headless commands (`--serve`, ...) drive it.
 
 pub mod app;
+pub mod autopilot;
 pub mod bps;
-pub mod commands;
 pub mod config;
 pub mod detector;
 pub mod init;
@@ -19,6 +19,9 @@ pub mod persister;
 pub mod pipeline;
 pub mod platform;
 pub mod proton;
+// Not built for now: the links tree waits for its own rework.
+#[allow(dead_code)]
+pub mod save_links;
 pub mod saver;
 pub mod scanner;
 pub mod sgdb;
@@ -26,6 +29,7 @@ pub mod share;
 pub mod sizer;
 pub mod steam;
 pub mod steam_self;
+pub mod updater;
 pub mod vdf;
 
 #[cfg(test)]

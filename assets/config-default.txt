@@ -38,29 +38,7 @@
 
 
 # ==========================================
-# 2. SAVE BACKUP & SYNC
-# ==========================================
-
-# Saves are copied into saves-copies/ and linked from saves-links/ (point
-# Syncthing or similar at saves-links/ for automatic sync).
-# SAVESCOPY_STRATEGY
-# backup: Create a backup of save files in saves-copies/
-# sync: Synchronize save files between the original and backup locations
-# restore: Restore save files from saves-copies/ to the original location
-# (Dangerous, use with caution, will replace save files with backup files, each time the script is run)
-# (Removing a game from games/ will not remove its backup or link)
-# Default: backup
-#SAVESCOPY_STRATEGY=backup
-
-# Custom directory backups (optional): folders outside the cartridge to back up too
-# Format: BACKUP_<name>=<path>  (relative paths start at the cartridge folder)
-# The <name> becomes the backup folder name under saves-copies/
-# Example: BACKUP_gamescope-shaders=/home/deck/.local/share/gamescope/reshade/Shaders
-#BACKUP_gamescope-shaders=/home/deck/.local/share/gamescope/reshade/Shaders
-
-
-# ==========================================
-# 3. GAME LAUNCHERS & INTEGRATION
+# 2. GAME LAUNCHERS & INTEGRATION
 # ==========================================
 
 # Games in Steam: choose per game in the Library (Y), remembered in
@@ -97,24 +75,7 @@
 
 
 # ==========================================
-# 4. CUSTOM TASKS
-# ==========================================
-
-# Post-run commands (optional)
-# Format: RUN_AFTER_<number>=<command>
-# Commands are executed in alphabetical order by name after all modules finish.
-# Variables from this config can be used with ${VARIABLE_NAME}, plus the folders:
-# ${FREEGAMES_PATH} (games/), ${PATCHES_PATH} (mods/), ${SAVESCOPY_PATH}
-# (saves-copies/), ${SAVESLINK_PATH} (saves-links/), ${_CONFIG_PATH}, ${_SCRIPT_DIR}
-# Example: RUN_AFTER_01=echo "Syncing ${SAVESLINK_PATH}"
-#
-# Example: Sync the symlink folder to a Google Drive remote named "gdrive"
-# Note: The -L flag is required for rclone to follow the symlinks and copy the actual save files.
-#RUN_AFTER_02=rclone sync -L "${SAVESLINK_PATH}" gdrive:cartridge-saves
-
-
-# ==========================================
-# 5. SHARING ON THE LAN
+# 3. SHARING ON THE LAN
 # ==========================================
 
 # Let other •cartridge machines on the network see and copy your games (optional).
@@ -131,9 +92,16 @@
 
 
 # ==========================================
-# 6. DEBUG
+# 4. DEBUG
 # ==========================================
+
+# Only with a file named "debug" next to the app (debug mode): then SETTINGS
+# shows this section, and these keys apply.
 
 # Interface only: hide the Steam buttons and dim the Steam settings, as on a
 # machine without Steam.
 #DEBUG_NO_STEAM=False
+
+# Interface only: loop a fake library update in the Library's progress card,
+# to see it (a real update is often too quick). Nothing runs.
+#DEBUG_FAKE_PROGRESS=False

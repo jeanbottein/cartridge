@@ -107,10 +107,11 @@ fn detect_host() -> Host {
 }
 
 /// Whether a Steam install with a user profile is found: nothing to put
-/// shortcuts into otherwise. `DEBUG_NO_STEAM` pretends it isn't, to see the
-/// interface without Steam.
+/// shortcuts into otherwise. `DEBUG_NO_STEAM` (debug mode) pretends it
+/// isn't, to see the interface without Steam.
 pub fn detected(cfg: &Config) -> bool {
-    !cfg.is_true("DEBUG_NO_STEAM") && !userdata_config_dirs().is_empty()
+    let pretend_missing = crate::core::app::debug_mode() && cfg.is_true("DEBUG_NO_STEAM");
+    !pretend_missing && !userdata_config_dirs().is_empty()
 }
 
 /// Whether `restart` knows how to restart Steam on this machine.
