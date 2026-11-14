@@ -1,8 +1,9 @@
 //! SAVES: each game's saves on this machine and in its backup, side by side
 //! like two memory cards. A backs the focused game's saves up, X restores
-//! its backup, both after a confirmation. Only the focused game's folders
-//! are read, in the background; copies run in the background too, behind a
-//! modal that keeps the user (and a game launch) out until they end.
+//! its backup, both after a confirmation when they replace something. Only
+//! the focused game's folders are read, in the background; copies run in
+//! the background too, behind a modal that keeps the user (and a game
+//! launch) out until they end.
 
 use std::sync::mpsc::{channel, Receiver};
 
@@ -46,12 +47,17 @@ struct Shown {
     report: Report,
 }
 
-/// A copy waiting for the user's yes, with the saves it was asked for.
-struct Confirm {
-    dialog: Dialog,
+/// A backup or restore of one game's saves.
+struct Copy {
     direction: Direction,
     saves: Saves,
     title: String,
+}
+
+/// A copy waiting for the user's yes, with the saves it was asked for.
+struct Confirm {
+    dialog: Dialog,
+    copy: Copy,
 }
 
 #[derive(Default)]
@@ -149,6 +155,14 @@ fn question(shown: &Shown, direction: Direction) -> String {
     .join("\n")
 }
 
+/// The side a copy writes holds nothing yet: no need to confirm.
+fn replaces_nothing(report: &Report, direction: Direction) -> bool {
+    match direction {
+        Direction::Backup => report.backup.is_none(),
+        Direction::Restore => report.device.is_none(),
+    }
+}
+
 /// Why nothing can be done, when the cards don't already say it.
 fn note(shown: &Shown) -> Option<&str> {
     let report = &shown.report;
@@ -211,7 +225,7 @@ impl SavesScreen {
                 Outcome::Open => {}
                 Outcome::Chosen(0) => {
                     if let Some(confirm) = self.confirm.take() {
-                        self.start_copy(confirm);
+                        self.start_copy(confirm.copy);
                     }
                 }
                 Outcome::Chosen(_) | Outcome::Cancelled => self.confirm = None,
@@ -261,25 +275,31 @@ impl SavesScreen {
             self.toast.show(&why, theme::secondary());
             return;
         }
+        let copy = Copy {
+            direction,
+            saves: shown.saves.clone(),
+            title: shown.title.clone(),
+        };
+        if replaces_nothing(&shown.report, direction) {
+            self.start_copy(copy);
+            return;
+        }
         self.confirm = Some(Confirm {
             dialog: Dialog::new(
                 title,
                 &question(shown, direction),
                 &[(label, color), ("Cancel", theme::muted())],
             ),
-            direction,
-            saves: shown.saves.clone(),
-            title: shown.title.clone(),
+            copy,
         });
     }
 
-    fn start_copy(&mut self, confirm: Confirm) {
-        let Confirm {
+    fn start_copy(&mut self, copy: Copy) {
+        let Copy {
             direction,
             saves,
             title,
-            ..
-        } = confirm;
+        } = copy;
         let (tx, rx) = channel();
         std::thread::spawn(move || {
             let result = match direction {
@@ -525,6 +545,17 @@ mod tests {
         assert_eq!(restore.lines().count(), 4);
         assert!(restore.ends_with("they will be lost. Close the game first."));
         assert_eq!(question(&shown, Direction::Backup).lines().count(), 3);
+    }
+
+    #[test]
+    fn only_a_copy_over_something_needs_a_confirmation() {
+        let first_backup = report(stamp(1), None);
+        assert!(replaces_nothing(&first_backup, Direction::Backup));
+        let fresh_install = report(None, stamp(1));
+        assert!(replaces_nothing(&fresh_install, Direction::Restore));
+        let both = report(stamp(1), stamp(1));
+        assert!(!replaces_nothing(&both, Direction::Backup));
+        assert!(!replaces_nothing(&both, Direction::Restore));
     }
 
     #[test]

@@ -447,16 +447,16 @@ impl Library {
         (text, color)
     }
 
-    /// Install state and sizes of the focused game, e.g. `Installed · 1.2 GB`.
+    /// Size of the focused game, e.g. `1.2 GB`; a package says so (`Packaged · 1.1 GB`).
     fn install_line(&self) -> String {
         let game = &self.games[self.cursor];
         let size = |s: Option<u64>| s.map_or("? B".to_string(), sizer::human);
         let package = size(self.package_sizes[self.cursor]);
         match &game.install {
-            Install::Installed => format!("Installed · {}", size(game.size)),
+            Install::Installed => size(game.size),
             Install::Packaged { .. } => format!("Packaged · {package}"),
             Install::InstalledWithPackage { verified, .. } => format!(
-                "Installed {} + Package {package}{}",
+                "{} + Package {package}{}",
                 size(game.size),
                 if *verified { "" } else { " (different)" }
             ),

@@ -28,7 +28,7 @@ pub struct Info<'a> {
     pub year: Option<u32>,
     pub players: &'a str,
     pub targets: &'a [Target],
-    /// Where the game is and how big, e.g. `Installed · 1.2 GB`.
+    /// How big the game is, e.g. `1.2 GB`, and whether it is packaged.
     pub status: String,
     pub description: &'a str,
     /// The cover is on its way.
