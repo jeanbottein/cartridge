@@ -225,6 +225,13 @@ impl Ui {
         text::wrap_segments(&words, " ", max_w, |s| self.measure(s))
     }
 
+    /// Wrap a path in small text after its separators, so the whole path
+    /// shows (a cut start can hide that it points to another machine).
+    pub fn wrap_path_small(&self, path: &str, max_w: f32) -> Vec<String> {
+        let parts: Vec<&str> = path.split_inclusive(['/', '\\']).collect();
+        text::wrap_segments(&parts, "", max_w, |s| self.measure_small(s))
+    }
+
     pub fn action(&self, a: Action) -> bool {
         self.input.action(a)
     }

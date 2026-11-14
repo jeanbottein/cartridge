@@ -166,7 +166,7 @@ fn replaces_nothing(report: &Report, direction: Direction) -> bool {
 /// Why nothing can be done, when the cards don't already say it.
 fn note(shown: &Shown) -> Option<&str> {
     let report = &shown.report;
-    if shown.saves.folders.is_empty() {
+    if shown.saves.folders.is_empty() || report.none_found(&shown.saves) {
         return report.cannot_back_up.as_deref();
     }
     let backup = report
@@ -432,7 +432,13 @@ fn draw_panel(ui: &Ui, panel: Rect, shown: &Shown) {
         "THIS DEVICE"
     };
     let no_path = shown.saves.folders.is_empty();
-    let device_empty = if no_path { "NO SAVE PATH" } else { "NO SAVE" };
+    let device_empty = if no_path {
+        "NO SAVE PATH"
+    } else if shown.report.none_found(&shown.saves) {
+        "NOT FOUND"
+    } else {
+        "NO SAVE"
+    };
     draw_card(
         ui,
         device,
@@ -458,17 +464,19 @@ fn draw_panel(ui: &Ui, panel: Rect, shown: &Shown) {
         }
     }
     for folder in &shown.saves.folders {
-        if y > panel.bottom() {
-            break;
-        }
+        let color = if shown.report.missing.contains(&folder.device) {
+            theme::danger()
+        } else {
+            theme::muted()
+        };
         let path = folder.device.display().to_string();
-        ui.small_text(
-            &ui.truncate_start(&path, panel.w),
-            panel.x,
-            y,
-            theme::muted(),
-        );
-        y += 16.0;
+        for line in ui.wrap_path_small(&path, panel.w) {
+            if y > panel.bottom() {
+                return;
+            }
+            ui.small_text(&line, panel.x, y, color);
+            y += 16.0;
+        }
     }
 }
 
@@ -520,6 +528,7 @@ mod tests {
             backup,
             cannot_back_up: None,
             cannot_restore: None,
+            missing: Vec::new(),
         }
     }
 

@@ -266,19 +266,43 @@ pub struct Report {
     pub backup: Option<Stamp>,
     pub cannot_back_up: Option<String>,
     pub cannot_restore: Option<String>,
+    /// Save folders not on disk: the game hasn't saved yet, or the path is
+    /// wrong (an absolute path from another machine).
+    pub missing: Vec<PathBuf>,
+}
+
+impl Report {
+    /// None of the save folders exist.
+    pub fn none_found(&self, saves: &Saves) -> bool {
+        none_found(saves, &self.missing)
+    }
+}
+
+fn none_found(saves: &Saves, missing: &[PathBuf]) -> bool {
+    !saves.folders.is_empty() && missing.len() == saves.folders.len()
 }
 
 const NO_SAVES: &str = "No saves to back up yet.";
+const NOT_FOUND: &str =
+    "Save folder not found: the game hasn't saved yet, or its save path is wrong (Library, X).";
 const NO_BACKUP: &str = "No backup yet.";
 
 pub fn report(saves: &Saves) -> Report {
     let device = stamp(saves.folders.iter().map(|f| f.device.clone()));
     let backup = stamp(saves.folders.iter().map(|f| saves.backup.join(&f.name)));
+    let missing: Vec<PathBuf> = saves
+        .folders
+        .iter()
+        .map(|f| f.device.clone())
+        .filter(|device| !device.is_dir())
+        .collect();
+    let empty = if none_found(saves, &missing) { NOT_FOUND } else { NO_SAVES };
     let refused = refusal(saves);
     Report {
+        missing,
         cannot_back_up: refused
             .clone()
-            .or_else(|| device.is_none().then(|| NO_SAVES.into())),
+            .or_else(|| device.is_none().then(|| empty.into())),
         cannot_restore: refused
             .or_else(|| backup.is_none().then(|| NO_BACKUP.into()))
             .or_else(|| missing_prefix(saves)),
@@ -554,6 +578,24 @@ mod tests {
         assert_eq!(report.backup, None);
         assert_eq!(report.cannot_back_up, None);
         assert_eq!(report.cannot_restore.as_deref(), Some("No backup yet."));
+    }
+
+    #[test]
+    fn a_save_folder_that_is_not_on_disk_is_reported_missing() {
+        let dir = TempDir::new();
+        dir.mkdir("empty");
+        let saves = saves(&dir, &game(&dir, &["gone", "empty"]));
+
+        let report = report(&saves);
+        assert_eq!(report.missing, vec![dir.path().join("gone")]);
+        assert_eq!(report.cannot_back_up.as_deref(), Some(NO_SAVES));
+    }
+
+    #[test]
+    fn no_save_folder_on_disk_says_the_save_path_may_be_wrong() {
+        let dir = TempDir::new();
+        let report = report(&saves(&dir, &game(&dir, &["gone"])));
+        assert!(report.cannot_back_up.unwrap().starts_with("Save folder not found"));
     }
 
     #[test]
