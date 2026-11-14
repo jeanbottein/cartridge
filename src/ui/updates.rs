@@ -365,9 +365,10 @@ impl UpdatesScreen {
             Status::Failed(e) => lines.wrapped(e, theme::danger(), 3),
             Status::NoFile(release) => {
                 lines.release(release);
-                let (os, arch) = updater::platform_of(game);
+                let platform = updater::platform_of(game);
                 let why = format!(
-                    "No {os} {arch} archive in this release: set \"asset\" in the game's update block to part of the file name."
+                    "No {} {} build in this release: set \"asset\" in the game's update block to part of the file name.",
+                    platform.os, platform.arch
                 );
                 lines.wrapped(&why, theme::secondary(), 3);
             }

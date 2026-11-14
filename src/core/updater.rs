@@ -1,6 +1,7 @@
 //! Game updates from GitHub releases (`"update"` in game.json): read the
 //! latest release, pick its file for the game's platform, and lay that
-//! archive's files over the game folder. Like an installer run over an older
+//! archive's files over the game folder (a release file that is the program
+//! itself, like an AppImage, replaces the game's executable). Like an installer run over an older
 //! install, it only adds and replaces files: nothing is deleted, so saves,
 //! settings, ROMs and mods the game keeps in its folder stay. `.cartridge/`
 //! is never written by the archive.
@@ -60,6 +61,11 @@ struct GithubRelease {
 enum Archive {
     TarGz,
     Zip,
+}
+
+/// A Linux program in one file.
+fn is_appimage(name: &str) -> bool {
+    name.to_lowercase().ends_with(".appimage")
 }
 
 fn archive_of(name: &str) -> Option<Archive> {
@@ -183,64 +189,87 @@ fn mentions_other_arch(name: &str, arch: &str) -> bool {
         .any(|(_, words)| mentions(name, words))
 }
 
+/// What a game runs as on this machine.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Platform {
+    pub os: String,
+    pub arch: String,
+    /// The game's executable, relative to its folder (empty when unknown).
+    pub target: String,
+}
+
+/// The file is a build for `platform`: it names its OS, or is an AppImage
+/// for Linux (taken as x64 unless it names an arch); never another arch.
+fn is_for(name: &str, platform: &Platform) -> bool {
+    let name = name.to_lowercase();
+    if mentions_other_arch(&name, &platform.arch) {
+        return false;
+    }
+    let names_arch = mentions(&name, words_of(&ARCH_WORDS, &platform.arch));
+    let linux_appimage =
+        platform.os == "linux" && is_appimage(&name) && (names_arch || platform.arch == "x64");
+    mentions(&name, words_of(&OS_WORDS, &platform.os)) || linux_appimage
+}
+
 /// The release file to install: the first whose name contains `pattern`
-/// when given, else the archive for `os`, preferring one that names `arch`
-/// and never one that names another arch.
+/// when given, else a build for `platform`, preferring the same kind as the
+/// game's executable (an AppImage, or else an archive), then one that names
+/// its arch.
 pub fn pick_asset<'a>(
     release: &'a Release,
-    os: &str,
-    arch: &str,
+    platform: &Platform,
     pattern: &str,
 ) -> Option<&'a Asset> {
     let pattern = pattern.trim().to_lowercase();
     let usable = release.assets.iter().filter(|a| {
         let name = a.name.to_lowercase();
-        archive_of(&name).is_some() && !SKIPPED.iter().any(|s| name.contains(s))
+        let installable = archive_of(&name).is_some() || is_appimage(&name);
+        installable && !SKIPPED.iter().any(|s| name.contains(s))
     });
     if !pattern.is_empty() {
         return usable
             .into_iter()
             .find(|a| a.name.to_lowercase().contains(&pattern));
     }
-    let for_os: Vec<&Asset> = usable
-        .filter(|a| {
-            let name = a.name.to_lowercase();
-            mentions(&name, words_of(&OS_WORDS, os)) && !mentions_other_arch(&name, arch)
+    let wants_appimage = is_appimage(&platform.target);
+    let arch_words = words_of(&ARCH_WORDS, &platform.arch);
+    usable
+        .filter(|a| is_for(&a.name, platform))
+        .enumerate()
+        .min_by_key(|(i, a)| {
+            let other_kind = is_appimage(&a.name) != wants_appimage;
+            let no_arch = !mentions(&a.name.to_lowercase(), arch_words);
+            (other_kind, no_arch, *i)
         })
-        .collect();
-    let names_arch = |a: &&&Asset| mentions(&a.name.to_lowercase(), words_of(&ARCH_WORDS, arch));
-    for_os
-        .iter()
-        .find(names_arch)
-        .or_else(|| for_os.first())
-        .copied()
+        .map(|(_, a)| a)
 }
 
-/// The OS and arch the game runs as here: its target for this machine's
-/// OS, else (a Windows game under Proton) its first target.
-pub fn platform_of(game: &Game) -> (String, String) {
+/// What the game runs as here: its target for this machine's OS, else (a
+/// Windows game under Proton) its first target.
+pub fn platform_of(game: &Game) -> Platform {
     let os = platform::os_tag();
     let target = game
         .targets
         .iter()
         .find(|t| t.os == os)
         .or_else(|| game.targets.first());
+    // `any` (like empty) means it runs as whatever this machine is.
     let pick = |value: Option<&str>, fallback: &str| {
         value
-            .filter(|v| !v.is_empty())
+            .filter(|v| !v.is_empty() && !v.eq_ignore_ascii_case("any"))
             .unwrap_or(fallback)
             .to_string()
     };
-    (
-        pick(target.map(|t| t.os.as_str()), os),
-        pick(target.map(|t| t.arch.as_str()), platform::arch_tag()),
-    )
+    Platform {
+        os: pick(target.map(|t| t.os.as_str()), os),
+        arch: pick(target.map(|t| t.arch.as_str()), platform::arch_tag()),
+        target: pick(target.map(|t| t.target.as_str()), ""),
+    }
 }
 
 /// The file of `release` to install for `game`.
 pub fn asset_for<'a>(game: &Game, release: &'a Release) -> Option<&'a Asset> {
-    let (os, arch) = platform_of(game);
-    pick_asset(release, &os, &arch, &game.update.asset)
+    pick_asset(release, &platform_of(game), &game.update.asset)
 }
 
 // ── Installing ───────────────────────────────────────────────────────────
@@ -439,6 +468,42 @@ fn upsert(src_root: &Path, game_dir: &Path) -> Result<usize, String> {
         .sum()
 }
 
+/// Put the downloaded program `file` in place of the game's executable
+/// `target` (relative to `game_dir`), runnable.
+fn replace_program(file: &Path, game_dir: &Path, target: &str) -> Result<(), String> {
+    let rel: PathBuf = Path::new(target)
+        .components()
+        .filter(|c| !matches!(c, std::path::Component::CurDir))
+        .collect();
+    if rel.as_os_str().is_empty() {
+        return Err("The game has no executable for this file to replace".into());
+    }
+    let dest = package::safe_join(game_dir, &rel)?;
+    if dest.is_dir() {
+        return Err(format!("{target}: a folder, not a program"));
+    }
+    platform::make_executable(file)
+        .and_then(|()| replace_file(file, &dest))
+        .map_err(|e| format!("{target}: {e}"))
+}
+
+/// Unpack `archive` and lay its files over the game. Returns how many
+/// files were written.
+fn lay_archive(
+    kind: Archive,
+    archive: &Path,
+    game_dir: &Path,
+    (extracted, inner): (&Path, &Path),
+    progress: &Progress,
+) -> Result<usize, String> {
+    let unpacked = unpack(kind, archive, extracted, inner)?;
+    if progress.is_cancelled() {
+        return Err("cancelled".into());
+    }
+    let root = content_root(&unpacked, game_dir).map_err(|e| e.to_string())?;
+    upsert(&root, game_dir)
+}
+
 /// Rewrite the game's game.json as on disk now, changed by `change`.
 fn rewrite_game_json(game: &Game, change: impl FnOnce(&mut Game)) -> Result<(), String> {
     let path = game.game_json_path();
@@ -454,7 +519,8 @@ pub fn mark_installed(game: &Game, tag: &str) -> Result<(), String> {
     rewrite_game_json(game, |g| g.update.installed = tag.to_string())
 }
 
-/// Download `asset` of release `tag` and lay its files over the game.
+/// Download `asset` of release `tag` and lay its files over the game (or,
+/// when it is a program in one file, put it in place of the executable).
 /// Downloads and unpacks under hidden names next to the game folder (the
 /// scanner ignores them), removed whatever happens.
 pub fn install(
@@ -466,7 +532,6 @@ pub fn install(
     if !game.is_installed() {
         return Err("Unpack the game before updating it".into());
     }
-    let kind = archive_of(&asset.name).ok_or_else(|| format!("{}: not an archive", asset.name))?;
     let games_dir = game
         .dir
         .parent()
@@ -480,12 +545,10 @@ pub fn install(
     let inner = games_dir.join(package::staging_name(&format!("{name}.update-inner")));
     let result = (|| {
         download(asset, &archive, progress)?;
-        let unpacked = unpack(kind, &archive, &extracted, &inner)?;
-        if progress.is_cancelled() {
-            return Err("cancelled".into());
-        }
-        let root = content_root(&unpacked, &game.dir).map_err(|e| e.to_string())?;
-        let files = upsert(&root, &game.dir)?;
+        let files = match archive_of(&asset.name) {
+            Some(kind) => lay_archive(kind, &archive, &game.dir, (&extracted, &inner), progress)?,
+            None => replace_program(&archive, &game.dir, &platform_of(game).target).map(|()| 1)?,
+        };
         log::info!("{}: {files} files from {} ({tag})", game.title, asset.name);
         // The size changed: the run after the update measures it again.
         rewrite_game_json(game, |g| {
@@ -527,8 +590,78 @@ mod tests {
         }
     }
 
+    fn platform(os: &str, arch: &str, target: &str) -> Platform {
+        Platform {
+            os: os.into(),
+            arch: arch.into(),
+            target: target.into(),
+        }
+    }
+
     fn picked(release: &Release, os: &str, arch: &str, pattern: &str) -> Option<String> {
-        pick_asset(release, os, arch, pattern).map(|a| a.name.clone())
+        pick_asset(release, &platform(os, arch, "game"), pattern).map(|a| a.name.clone())
+    }
+
+    fn picked_for(release: &Release, target: &str) -> Option<String> {
+        pick_asset(release, &platform("linux", "x64", target), "").map(|a| a.name.clone())
+    }
+
+    #[test]
+    fn an_appimage_is_a_linux_x64_build() {
+        let soh = release(&[
+            "SoH-Dewey-Bravo-Mac.zip",
+            "SoH-Dewey-Bravo-Win64.zip",
+            "SoH-Dewey-Bravo.appimage",
+        ]);
+        assert_eq!(
+            picked_for(&soh, "soh.AppImage").unwrap(),
+            "SoH-Dewey-Bravo.appimage"
+        );
+        assert_eq!(picked(&soh, "linux", "arm64", ""), None);
+        assert_eq!(
+            picked(&soh, "windows", "x64", "").unwrap(),
+            "SoH-Dewey-Bravo-Win64.zip"
+        );
+    }
+
+    #[test]
+    fn the_executable_decides_between_an_appimage_and_an_archive() {
+        let both = release(&["Game-x86_64.AppImage", "Game-linux-x64.tar.gz"]);
+        assert_eq!(
+            picked_for(&both, "Game.AppImage").unwrap(),
+            "Game-x86_64.AppImage"
+        );
+        assert_eq!(
+            picked_for(&both, "bin/game").unwrap(),
+            "Game-linux-x64.tar.gz"
+        );
+    }
+
+    #[test]
+    fn a_program_file_replaces_the_executable_and_nothing_else() {
+        let dir = TempDir::new();
+        let game = installed_game(&dir);
+        dir.write("games/Banjo/soh.AppImage", b"old");
+        let file = dir.write("new.part", b"new appimage");
+        replace_program(&file, &game.dir, "./soh.AppImage").unwrap();
+        assert_eq!(
+            fs::read(game.dir.join("soh.AppImage")).unwrap(),
+            b"new appimage"
+        );
+        assert!(platform::has_exec_permission(
+            &game.dir.join("soh.AppImage")
+        ));
+        assert_eq!(fs::read(game.dir.join("saves/bk.bin")).unwrap(), b"my save");
+    }
+
+    #[test]
+    fn a_program_file_needs_an_executable_to_replace() {
+        let dir = TempDir::new();
+        let game = installed_game(&dir);
+        let file = dir.write("new.part", b"x");
+        assert!(replace_program(&file, &game.dir, "").is_err());
+        assert!(replace_program(&file, &game.dir, "saves").is_err());
+        assert!(replace_program(&file, &game.dir, "../outside").is_err());
     }
 
     #[test]
@@ -648,10 +781,16 @@ mod tests {
         };
         let mut game = Game::skeleton(Path::new("/g/G"));
         game.targets = vec![target("windows", "x64")];
-        assert_eq!(platform_of(&game), ("windows".into(), "x64".into()));
+        let os_arch = |p: Platform| (p.os, p.arch);
+        assert_eq!(
+            os_arch(platform_of(&game)),
+            ("windows".into(), "x64".into())
+        );
+        game.targets = vec![target("windows", "any")];
+        assert_eq!(platform_of(&game).arch, platform::arch_tag());
         game.targets.push(target(platform::os_tag(), "arm64"));
         assert_eq!(
-            platform_of(&game),
+            os_arch(platform_of(&game)),
             (platform::os_tag().into(), "arm64".into())
         );
     }
