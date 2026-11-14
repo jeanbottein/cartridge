@@ -129,6 +129,39 @@ impl Proton {
     }
 }
 
+/// Where the game's new releases come from (`"update"` in game.json).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Update {
+    /// A GitHub releases page (`https://github.com/<owner>/<repo>/releases/latest`).
+    #[serde(
+        default,
+        skip_serializing_if = "String::is_empty",
+        deserialize_with = "nullable"
+    )]
+    pub url: String,
+    /// Part of the release file's name to pick (`Linux-X64.tar.gz`); empty
+    /// picks it from the target's OS and arch.
+    #[serde(
+        default,
+        skip_serializing_if = "String::is_empty",
+        deserialize_with = "nullable"
+    )]
+    pub asset: String,
+    /// Tag of the release last installed (`v1.0.2`); empty when unknown.
+    #[serde(
+        default,
+        skip_serializing_if = "String::is_empty",
+        deserialize_with = "nullable"
+    )]
+    pub installed: String,
+}
+
+impl Update {
+    pub fn is_empty(&self) -> bool {
+        *self == Update::default()
+    }
+}
+
 /// Artwork filenames stored in `.cartridge/`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Images {
@@ -277,6 +310,7 @@ pub struct Game {
     pub description: String,
     /// Bytes of the game's own files (`.cartridge/` excluded).
     pub size: Option<u64>,
+    pub update: Update,
     pub install: Install,
     /// `.cartridge/game.json` exists on disk.
     pub has_cartridge: bool,
@@ -313,10 +347,16 @@ struct GameFileOut<'a> {
     description: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     size: Option<u64>,
+    #[serde(skip_serializing_if = "no_update")]
+    update: &'a Update,
 }
 
 fn no_proton(proton: &&Proton) -> bool {
     proton.is_empty()
+}
+
+fn no_update(update: &&Update) -> bool {
+    update.is_empty()
 }
 
 #[derive(Deserialize, Default)]
@@ -335,6 +375,7 @@ struct GameFileIn {
     players: Value,
     description: Value,
     size: Value,
+    update: Value,
 }
 
 impl Game {
@@ -387,6 +428,7 @@ impl Game {
             players: scalar_text(file.players),
             description: scalar_text(file.description),
             size: as_id(&file.size).and_then(|s| u64::try_from(s).ok()),
+            update: serde_json::from_value(file.update).unwrap_or_default(),
             has_cartridge: true,
             ..Default::default()
         })
@@ -408,7 +450,13 @@ impl Game {
             players: &self.players,
             description: &self.description,
             size: self.size,
+            update: &self.update,
         })
+    }
+
+    /// The game names a page its new releases come from.
+    pub fn has_update_url(&self) -> bool {
+        !self.update.url.trim().is_empty()
     }
 
     pub fn is_installed(&self) -> bool {
@@ -661,6 +709,48 @@ mod tests {
         )
         .unwrap();
         assert_eq!(game.proton.env.keys().collect::<Vec<_>>(), ["OK_1"]);
+    }
+
+    #[test]
+    fn round_trips_the_update_source_and_omits_it_when_unset() {
+        let text = r#"{
+    "schema_version": 2,
+    "title": "Banjo",
+    "targets": [],
+    "savePaths": [],
+    "images": {},
+    "update": {
+        "url": "https://github.com/BanjoRecomp/BanjoRecomp/releases/latest",
+        "installed": "v1.0.2"
+    }
+}"#;
+        let game = Game::from_json(Path::new("/g/Banjo"), text).unwrap();
+        assert!(game.has_update_url());
+        assert_eq!(game.update.installed, "v1.0.2");
+        assert_eq!(game.to_json(), text);
+        assert!(!Game::skeleton(Path::new("/g/X"))
+            .to_json()
+            .contains("update"));
+    }
+
+    #[test]
+    fn a_loose_update_field_keeps_the_rest_of_the_block() {
+        let game = Game::from_json(
+            Path::new("/g/X"),
+            r#"{"update": {"url": "https://github.com/a/b", "installed": 1.2, "asset": {}}}"#,
+        )
+        .unwrap();
+        assert_eq!(game.update.url, "https://github.com/a/b");
+        assert_eq!(game.update.installed, "1.2");
+        assert_eq!(game.update.asset, "");
+    }
+
+    #[test]
+    fn a_loose_update_block_reads_as_none() {
+        let game = Game::from_json(Path::new("/g/X"), r#"{"update": "nope"}"#).unwrap();
+        assert!(!game.has_update_url());
+        let null = Game::from_json(Path::new("/g/X"), r#"{"update": {"url": null}}"#).unwrap();
+        assert!(null.update.is_empty());
     }
 
     #[test]

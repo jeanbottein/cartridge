@@ -29,6 +29,7 @@ pub mod share;
 pub mod sizer;
 pub mod steam;
 pub mod steam_self;
+pub mod updater;
 pub mod vdf;
 
 #[cfg(test)]

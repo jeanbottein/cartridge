@@ -2,6 +2,7 @@
 //! input layer, text, shapes and themes.
 
 pub mod canvas;
+pub mod icon;
 pub mod input;
 pub mod shape;
 pub mod text;

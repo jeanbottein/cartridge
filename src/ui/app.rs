@@ -10,6 +10,7 @@ use macroquad::prelude::*;
 use super::dialog::{Dialog, Outcome as DialogOutcome};
 use super::editor::{self, Editor};
 use super::engine::canvas::Widescreen;
+use super::engine::icon::{self, Icon};
 use super::engine::input::Action;
 use super::engine::shape::fill_rounded;
 use super::engine::text::Fonts;
@@ -23,6 +24,7 @@ use super::network::{self, Network};
 use super::saves::SavesScreen;
 use super::settings::Settings;
 use super::setup::{self, Setup};
+use super::updates::{self, UpdatesScreen};
 use super::{style, wants_fullscreen, Hint, Ui};
 use crate::core::app::{debug_mode, exe_dir, find_system_dir};
 use crate::core::autopilot::Autopilot;
@@ -30,7 +32,7 @@ use crate::core::config::{self, Config};
 use crate::core::logging::{self, Line};
 use crate::core::share::{self, client, server::Server};
 use crate::core::{init, migrations};
-use crate::core::{package, steam, steam_self};
+use crate::core::{package, steam, steam_self, updater};
 
 const MARGIN: f32 = 16.0;
 const HEADER_H: f32 = 36.0;
@@ -40,8 +42,10 @@ const CONTENT_TOP: f32 = HEADER_H + LINE_GAP;
 const FOOTER_H: f32 = 28.0;
 /// Footer badges, from the footer line.
 const BADGE_TOP: f32 = 7.0;
-/// Room around a tab's name in the header.
+/// Room around a tab's icon (and name, when it is the current tab) in the header.
 const TAB_PAD: f32 = 7.0;
+/// Between a tab's icon and its name.
+const ICON_GAP: f32 = 6.0;
 
 /// Settings the autopilot uses: changing one runs it again.
 const RUN_ON_CHANGE: [&str; 6] = [
@@ -62,23 +66,36 @@ const RESUME_GRACE_SECS: f64 = 0.6;
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
     Library,
-    Network,
-    Saves,
     Mods,
+    Saves,
+    Updates,
+    Network,
     Settings,
 }
 
-const TABS: [(Tab, &str); 5] = [
-    (Tab::Library, "LIBRARY"),
-    (Tab::Network, "NETWORK"),
-    (Tab::Saves, "SAVES"),
-    (Tab::Mods, "MODS"),
-    (Tab::Settings, "SETTINGS"),
+/// The header shows every tab's icon, and the current tab's name beside it.
+const TABS: [(Tab, &str, Icon); 6] = [
+    (Tab::Library, "LIBRARY", Icon::Library),
+    (Tab::Mods, "MODS", Icon::Mods),
+    (Tab::Saves, "SAVES", Icon::Saves),
+    (Tab::Updates, "UPDATES", Icon::Updates),
+    (Tab::Network, "NETWORK", Icon::Network),
+    (Tab::Settings, "SETTINGS", Icon::Settings),
+];
+
+/// Keyboard shortcuts to each tab, in `TABS` order.
+const TAB_KEYS: [KeyCode; 6] = [
+    KeyCode::Key1,
+    KeyCode::Key2,
+    KeyCode::Key3,
+    KeyCode::Key4,
+    KeyCode::Key5,
+    KeyCode::Key6,
 ];
 
 impl Tab {
     fn index(self) -> usize {
-        TABS.iter().position(|(t, _)| *t == self).unwrap_or(0)
+        TABS.iter().position(|(t, ..)| *t == self).unwrap_or(0)
     }
 
     fn step(self, delta: isize) -> Tab {
@@ -97,7 +114,8 @@ pub struct App {
     network: Network,
     saves: SavesScreen,
     mods: ModsScreen,
-    /// File transfers running in the background (unpack, pack, copies).
+    updates: UpdatesScreen,
+    /// File transfers running in the background (unpack, pack, copies, updates).
     jobs: Jobs,
     editor: Option<Editor>,
     /// Keeps the library up to date (pipeline at launch and on folder changes).
@@ -137,6 +155,7 @@ impl App {
             network: Network::default(),
             saves: SavesScreen::default(),
             mods: ModsScreen::default(),
+            updates: UpdatesScreen::default(),
             jobs: Jobs::default(),
             editor: None,
             autopilot: None,
@@ -317,6 +336,7 @@ impl App {
         self.network.poll(self.config.as_ref());
         self.mods.poll(self.config.as_ref());
         self.saves.poll();
+        self.updates.poll();
         if let Some(music) = &mut self.music {
             music.update(get_frame_time(), self.session.is_some());
         }
@@ -373,13 +393,14 @@ impl App {
 
     /// Show what the autopilot changed: the library is reloaded when a batch
     /// of games was written and when a run that changed games ends. Pause it
-    /// while a game plays or the editor is open (it must not write the game
-    /// being edited).
+    /// while a game plays, the editor is open or a game updates (it must not
+    /// write the game being edited or updated).
     fn collect_runs(&mut self) {
         let Some(autopilot) = &self.autopilot else {
             return;
         };
-        autopilot.set_paused(self.session.is_some() || self.editor.is_some());
+        let updating = self.jobs.running().iter().any(|j| j.kind == Kind::Update);
+        autopilot.set_paused(self.session.is_some() || self.editor.is_some() || updating);
         let written = autopilot.progress().map_or(0, |step| step.written);
         let runs = autopilot.finished();
         let batch_written = written > self.written_seen;
@@ -408,6 +429,10 @@ impl App {
             return;
         }
         self.reload_library();
+        // An update changes files inside a game folder, which the watcher
+        // doesn't see: a run measures the size, restores exec bits and
+        // re-applies the mods the user turned on.
+        self.request_run();
         let games_dir = self.config.as_ref().and_then(Config::games_dir);
         self.network.recheck_local(games_dir.as_deref());
         for done in finished {
@@ -418,6 +443,7 @@ impl App {
             };
             self.library.toast.show(&done.message, color);
             self.network.toast.show(&done.message, color);
+            self.updates.toast.show(&done.message, color);
         }
     }
 
@@ -426,6 +452,7 @@ impl App {
             || self.editor.is_some()
             || self.network.has_modal()
             || self.saves.has_modal()
+            || self.updates.has_modal()
             || self.setup.is_some()
             || self.settings.as_ref().is_some_and(Settings::has_modal)
     }
@@ -452,14 +479,7 @@ impl App {
             self.tab = Tab::Library;
             self.back_held_over = true; // the same press must not count toward hold-to-quit
         }
-        let keys = [
-            KeyCode::Key1,
-            KeyCode::Key2,
-            KeyCode::Key3,
-            KeyCode::Key4,
-            KeyCode::Key5,
-        ];
-        for (key, (tab, _)) in keys.iter().zip(TABS) {
+        for (key, (tab, ..)) in TAB_KEYS.iter().zip(TABS) {
             if is_key_pressed(*key) {
                 self.tab = tab;
             }
@@ -530,6 +550,7 @@ impl App {
         match self.tab {
             Tab::Library => self.update_library(area),
             Tab::Network => self.update_network(area),
+            Tab::Updates => self.update_updates(area),
             Tab::Saves => {
                 if let Some(cfg) = &self.config {
                     self.saves.update(&self.ui, area, &self.library.games, cfg);
@@ -686,6 +707,41 @@ impl App {
         self.library.toast.show(&message, color);
     }
 
+    /// Updates write game.json: only while the autopilot doesn't (its
+    /// persister would put back what it read before), and paused at once.
+    fn update_updates(&mut self, area: Rect) {
+        let Some(event) = self
+            .updates
+            .update(&self.ui, area, &self.library.games, &self.jobs)
+        else {
+            return;
+        };
+        if self.updating() {
+            let wait = "The library is being updated, one moment...";
+            self.updates.toast.show(wait, theme::secondary());
+            return;
+        }
+        match event {
+            updates::Event::Install { game, asset, tag } => {
+                if let Some(autopilot) = &self.autopilot {
+                    autopilot.set_paused(true);
+                }
+                let (id, title) = (game.folder_name.clone(), game.title.clone());
+                self.jobs.start(Kind::Update, &id, &title, move |p| {
+                    updater::install(&game, &asset, &tag, p)
+                });
+            }
+            updates::Event::MarkInstalled { game, tag } => {
+                let (message, color) = match updater::mark_installed(&game, &tag) {
+                    Ok(()) => (format!("{}: {tag} installed", game.title), theme::accent()),
+                    Err(e) => (e, theme::danger()),
+                };
+                self.updates.toast.show(&message, color);
+                self.reload_library();
+            }
+        }
+    }
+
     fn update_network(&mut self, area: Rect) {
         let Some(cfg) = &self.config else { return };
         let Some(event) = self.network.update(&self.ui, area, cfg, &self.jobs) else {
@@ -742,6 +798,10 @@ impl App {
                     .draw(&self.ui, area, self.config.as_ref(), &self.jobs)
             }
             (None, Tab::Saves, _) => self.saves.draw(&self.ui, area, &self.library.games),
+            (None, Tab::Updates, _) => {
+                self.updates
+                    .draw(&self.ui, area, &self.library.games, &self.jobs)
+            }
             (None, Tab::Mods, _) => self.mods.draw(&self.ui, area, self.config.as_ref()),
             (None, Tab::Settings, _) => {
                 if let Some(settings) = &self.settings {
@@ -785,31 +845,47 @@ impl App {
     fn draw_header(&self) {
         let (w, h) = self.ui.canvas.size();
         style::backdrop(Rect::new(0.0, 0.0, w, CONTENT_TOP), h);
-        let tabs: Vec<(&str, bool)> = match &self.setup {
-            Some(_) => vec![("SETUP", true)],
-            None => TABS
-                .iter()
-                .map(|(tab, name)| (*name, *tab == self.tab))
-                .collect(),
+        let tabs_end = match &self.setup {
+            Some(_) => self.draw_tab(MARGIN, "SETUP", None, true),
+            None => TABS.iter().fold(MARGIN, |x, (tab, name, icon)| {
+                self.draw_tab(x, name, Some(*icon), *tab == self.tab)
+            }),
         };
-        let mut x = MARGIN;
-        for (name, active) in tabs {
-            let width = self.ui.measure(name);
-            if active {
-                let pill = Rect::new(x - TAB_PAD, 7.0, width + 2.0 * TAB_PAD, 22.0);
-                fill_rounded(pill, theme::current().radius, fade(theme::accent(), 0.16));
-                draw_rectangle(pill.x, pill.bottom() - 2.0, pill.w, 2.0, theme::accent());
-            }
-            let color = if active {
-                theme::accent()
-            } else {
-                theme::muted()
-            };
-            self.ui.text(name, x, 23.0, color);
-            x += width + 2.0 * TAB_PAD + 6.0;
-        }
-        self.draw_indicators(x, w);
+        self.draw_indicators(tabs_end, w);
         draw_rectangle(0.0, HEADER_H, w, 1.0, theme::border());
+    }
+
+    /// One tab at `x`: its icon, plus its name in a pill when current.
+    /// Returns where the next tab starts.
+    fn draw_tab(&self, x: f32, name: &str, icon: Option<Icon>, active: bool) -> f32 {
+        let icon_w = icon.map_or(0.0, |_| icon::SIZE);
+        let name_w = match (active, icon) {
+            (false, _) => 0.0,
+            (true, None) => self.ui.measure(name),
+            (true, Some(_)) => ICON_GAP + self.ui.measure(name),
+        };
+        let width = icon_w + name_w;
+        let color = if active {
+            theme::accent()
+        } else {
+            theme::muted()
+        };
+        if active {
+            let pill = Rect::new(x - TAB_PAD, 7.0, width + 2.0 * TAB_PAD, 22.0);
+            fill_rounded(pill, theme::current().radius, fade(theme::accent(), 0.16));
+            draw_rectangle(pill.x, pill.bottom() - 2.0, pill.w, 2.0, theme::accent());
+        }
+        if let Some(icon) = icon {
+            icon::draw(icon, x, 10.0, color);
+            if icon == Icon::Updates && self.updates.has_available(&self.library.games) {
+                icon::dot(x, 10.0, theme::accent());
+            }
+        }
+        if active {
+            self.ui
+                .text(name, x + width - self.ui.measure(name), 23.0, color);
+        }
+        x + width + 2.0 * TAB_PAD + 4.0
     }
 
     /// Right side of the header: the cartridge's name, then music muted, the
@@ -894,6 +970,10 @@ impl App {
                 return self.saves.hints(ui, &self.library.games)
             }
             (Tab::Saves, _) => self.saves.hints(ui, &self.library.games),
+            (Tab::Updates, _) if self.updates.has_modal() => {
+                return self.updates.hints(ui, &self.library.games, &self.jobs)
+            }
+            (Tab::Updates, _) => self.updates.hints(ui, &self.library.games, &self.jobs),
             (Tab::Mods, _) => self.mods.hints(ui),
             (Tab::Settings, _) => match &self.settings {
                 Some(settings) if settings.has_modal() => return settings.hints(ui),

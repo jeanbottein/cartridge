@@ -22,6 +22,7 @@ mod saves;
 mod settings;
 mod setup;
 mod style;
+mod updates;
 
 use std::path::{Path, PathBuf};
 

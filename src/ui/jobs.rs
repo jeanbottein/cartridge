@@ -1,4 +1,4 @@
-//! Long file transfers (unpack, pack, download, install) on worker threads.
+//! Long file transfers (unpack, pack, download, install, update) on worker threads.
 //! The UI reads their byte progress every frame and collects results when
 //! they finish; at most one job per game.
 
@@ -17,6 +17,7 @@ pub enum Kind {
     Pack,
     Download,
     Install,
+    Update,
 }
 
 impl Kind {
@@ -26,6 +27,7 @@ impl Kind {
             Kind::Pack => "Packing",
             Kind::Download => "Downloading",
             Kind::Install => "Installing",
+            Kind::Update => "Updating",
         }
     }
 
@@ -35,6 +37,7 @@ impl Kind {
             Kind::Pack => "Packed",
             Kind::Download => "Downloaded",
             Kind::Install => "Installed",
+            Kind::Update => "Updated",
         }
     }
 }

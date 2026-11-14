@@ -22,6 +22,7 @@ core::pipeline::Pipeline (one fixed sequence; each phase only does what is missi
  7. manifest::write          # manifests.json (MANIFEST_EXPORT)
  8. mods::run                # Keep the mods the user turned on applied (system/mods.json)
  (saver.rs: per-game save backup/restore, by hand from the SAVES tab, never by the pipeline)
+ (updater.rs: game updates from GitHub releases, by hand from the UPDATES tab, never by the pipeline)
 ```
 
 Migrations: `launch_manifest.json` → `.cartridge/game.json`, nested → flat `savePaths`, arch `x86_64` → `x64`. Add new ones to `migrations::run_all`; keep them idempotent.
@@ -47,18 +48,20 @@ src/
     save_links.rs        # saves-links/ symlink tree (not built for now)
     proton.rs            # Windows games with Steam's Proton + runtime, in the shortcut's compatdata prefix; winetricks
     patcher.rs mods.rs   # mod file engine (state/apply/restore) + mod model (list, on/off)
+    updater.rs           # game.json "update": latest GitHub release, asset pick by os/arch, download + upsert over the game folder (never deletes, never writes .cartridge/)
     pipeline.rs init.rs logging.rs
     autopilot.rs         # Worker + Watcher: lists games/ every 2 s (served from the kernel cache), waits for new entries to stop changing
   ui/                    # macroquad UI
-    app.rs               # Shell: tabs, footer hints, game session lock, autopilot (paused while a game runs or the editor is open), warning toasts
+    app.rs               # Shell: icon tabs (current one named), footer hints, game session lock, autopilot (paused while a game runs or the editor is open), warning toasts
     library.rs editor.rs settings.rs setup.rs
     form.rs list.rs keyboard.rs browser.rs dialog.rs   # widgets
     network.rs jobs.rs info.rs   # Network tab, background transfers, shared info panel
     mods.rs              # MODS tab: mods with status, A turns one on/off
     saves.rs             # SAVES tab: device and backup cards of the focused game, A back up / X restore (confirmed)
+    updates.rs           # UPDATES tab: games with a release page; X checks GitHub (only on demand, 5 min cooldown), A updates (confirmed), Y marks installed
     style.rs             # Shared look: backdrop, cards, highlight, panels, bars, toasts, chips, badges
     covers.rs launcher.rs music.rs
-    engine/              # canvas (design px, drawn at native res), input, text, shape, theme
+    engine/              # canvas (design px, drawn at native res), input, text, shape, icon (tab icons from shapes), theme
 assets/                  # Embedded: fonts (VT323, Barlow), icon, steam-art, config-default.txt, games_locations.json
 testdata/                # Golden fixtures produced by the former Python implementation
 ```
@@ -90,7 +93,8 @@ Packages: a plain tar of `Foo/` with `.cartridge/package.json` first and `.cartr
 - **Steam, per game:** the user adds/removes each game (Library, Y), remembered in `system/steam.json`; the pipeline keeps exactly those shortcuts current. Ownership tag `cartridge:<id>` (`system/cartridge-id`) plus the folder-name label as a visible tag; the self-shortcut (`STEAM_ADD_SELF`, first SETTINGS option) uses `<owner tag>-self` and is applied as soon as it's toggled. Steam reads shortcuts at startup: the UI says "restart Steam" when it runs.
 - **Shared files:** the autopilot runs while the UI stays usable, so every writer of Steam's files takes `steam::files_lock()` and every mod apply/restore takes the lock in `mods`. Opening the editor pauses the autopilot.
 - **Logging:** `log` macros; `core::logging` prints to stderr, or to the systemd journal (`journalctl --user -t cartridge`) when stderr is no terminal; the UI toasts warnings and errors. No log file.
-- **Minimal dependencies:** macroquad, gilrs (feature `gamepad`), rodio (feature `music`, ALSA at build time), serde/serde_json, image, ureq, crc32fast, tar, log, chrono (`clock` only: local save dates).
+- **Game updates:** `"update": {url, asset, installed}` in game.json (omitted when empty). `url` is a GitHub project page; `asset` an optional part of the release file name (else picked from the target's os/arch, Flatpak skipped); `installed` the tag last installed. An update is an upsert like a Windows installer: archive files are added or replaced, nothing is deleted (saves, configs, ROMs, mods stay). The autopilot pauses while one runs.
+- **Minimal dependencies:** macroquad, gilrs (feature `gamepad`), rodio (feature `music`, ALSA at build time), serde/serde_json, image, ureq, crc32fast, tar, flate2 + zip (update archives, inflate only), log, chrono (`clock` only: local save dates).
 
 ## Dev Workflow
 

@@ -1,4 +1,4 @@
-//! Game editor: title, SteamGridDB ID, notes, targets, Proton, save paths and artwork
+//! Game editor: title, SteamGridDB ID, notes, targets, Proton, save paths, release page and artwork
 //! of one game, with auto-detection, artwork fetching and `game.json` saving.
 
 use std::collections::BTreeMap;
@@ -233,6 +233,10 @@ fn fields(game: &Game, proton_tools: &[String]) -> Vec<Field> {
             "",
             theme::info(),
         ),
+        Field::section("UPDATES"),
+        Field::text("update.url", "Release page", &game.update.url).with_help(
+            "The game's GitHub page (github.com/<owner>/<repo>): the UPDATES tab installs its new releases over the game's files.",
+        ),
         Field::section("ARTWORK"),
     ]);
     for (i, &slot) in ImageSlot::ALL.iter().enumerate() {
@@ -348,6 +352,8 @@ impl Editor {
                 Err(_) => self.say("The SteamGridDB ID must be a number.", Tone::Danger),
             },
             "notes" => self.game.notes = value,
+            "update.url" if value.trim().is_empty() => self.game.update = Default::default(),
+            "update.url" => self.game.update.url = value.trim().to_string(),
             "proton.version" => self.game.proton.version = value,
             "proton.winetricks" => {
                 self.game.proton.winetricks = value.split_whitespace().map(str::to_string).collect()
