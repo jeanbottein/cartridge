@@ -23,7 +23,7 @@ use super::network::{self, Network};
 use super::settings::Settings;
 use super::setup::{self, Setup};
 use super::{style, wants_fullscreen, Hint, Ui};
-use crate::core::app::{exe_dir, find_system_dir};
+use crate::core::app::{debug_mode, exe_dir, find_system_dir};
 use crate::core::autopilot::Autopilot;
 use crate::core::config::{self, Config};
 use crate::core::logging::{self, Line};
@@ -709,9 +709,8 @@ impl App {
             (Some(setup), _, _) => setup.draw(&self.ui, area),
             (None, Tab::Library, Some(editor)) => editor.draw(&self.ui, area),
             (None, Tab::Library, None) => {
-                let step = self.autopilot.as_ref().and_then(Autopilot::progress);
-                let label = step.map(|s| format!("Updating · {}", s.label()));
-                let update = label.as_deref().zip(step.map(|s| s.fraction()));
+                let update = self.update_card();
+                let update = update.as_ref().map(|(label, f)| (label.as_str(), *f));
                 self.library.draw(&self.ui, area, &self.jobs, update);
             }
             (None, Tab::Network, _) => {
@@ -743,6 +742,19 @@ impl App {
                 _ => {}
             }
         }
+    }
+
+    /// The Library's progress card: the autopilot's run, else the fake loop
+    /// of debug mode (drawn only; the autopilot never sees it).
+    fn update_card(&self) -> Option<(String, f32)> {
+        let step = self.autopilot.as_ref().and_then(Autopilot::progress);
+        let fake = debug_mode()
+            && self
+                .config
+                .as_ref()
+                .is_some_and(|c| c.is_true("DEBUG_FAKE_PROGRESS"));
+        step.map(|s| (format!("Updating · {}", s.label()), s.fraction()))
+            .or_else(|| fake.then(|| library::demo_progress(get_time())))
     }
 
     fn draw_header(&self) {

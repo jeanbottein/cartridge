@@ -19,6 +19,7 @@ use super::style::{self, Toast};
 use super::{draw_spinner, Hint, Ui};
 use crate::core::config::Config;
 use crate::core::models::{Game, Install};
+use crate::core::pipeline::Phase;
 use crate::core::proton::Downloads;
 use crate::core::scanner;
 use crate::core::{sizer, steam};
@@ -102,6 +103,24 @@ impl Snapshot {
             downloads: Downloads::of(cfg),
         }
     }
+}
+
+/// A fake library update for the progress card (Settings > DEBUG), looping
+/// with `time`: the card's look, with nothing running. (label, progress 0..1)
+pub fn demo_progress(time: f64) -> (String, f32) {
+    const PERIOD: f64 = 6.0;
+    const GAMES: usize = 200;
+    const PHASES: [Phase; 5] = [
+        Phase::Scan,
+        Phase::Detect,
+        Phase::Measure,
+        Phase::Enrich,
+        Phase::SteamExport,
+    ];
+    let fraction = (time.rem_euclid(PERIOD) / PERIOD) as f32;
+    let phase = PHASES[((fraction * PHASES.len() as f32) as usize).min(PHASES.len() - 1)];
+    let done = (fraction * GAMES as f32) as usize / 10 * 10;
+    (format!("Demo · {} {done}/{GAMES}", phase.label()), fraction)
 }
 
 /// Where the cursor goes in a new list: on the game it was on, if still there.
@@ -504,6 +523,15 @@ mod tests {
             .iter()
             .map(|n| Game::skeleton(std::path::Path::new(n)))
             .collect()
+    }
+
+    #[test]
+    fn the_demo_progress_loops_and_says_it_is_a_demo() {
+        let (label, start) = demo_progress(0.0);
+        assert_eq!((label.as_str(), start), ("Demo · Scanning 0/200", 0.0));
+        let (label, middle) = demo_progress(3.0);
+        assert_eq!((label.as_str(), middle), ("Demo · Size 100/200", 0.5));
+        assert_eq!(demo_progress(6.0 + 3.0), demo_progress(3.0));
     }
 
     #[test]

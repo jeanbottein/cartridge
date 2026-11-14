@@ -7,6 +7,7 @@
 //! which is the cartridge folder's name.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use super::paths;
 
@@ -78,6 +79,18 @@ pub fn exe_dir() -> PathBuf {
     launched_file()
         .and_then(|p| p.parent().map(Path::to_path_buf))
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// A file named `debug` next to the app turns debug mode on: Settings shows
+/// its DEBUG section, and the `DEBUG_*` keys only apply then (removing the
+/// file turns them all off). Checked once per launch.
+pub fn debug_mode() -> bool {
+    static DEBUG: OnceLock<bool> = OnceLock::new();
+    *DEBUG.get_or_init(|| debug_file_in(&exe_dir()))
+}
+
+fn debug_file_in(dir: &Path) -> bool {
+    dir.join("debug").is_file()
 }
 
 /// False on Linux without X11/Wayland (e.g. over SSH), where a window can't open.
@@ -160,6 +173,17 @@ pub fn find_system_dir(cli_dir: Option<&Path>) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use crate::core::testutil::TempDir;
+
+    #[test]
+    fn debug_mode_needs_a_file_named_debug_next_to_the_app() {
+        let dir = TempDir::new();
+        assert!(!debug_file_in(dir.path()));
+        dir.mkdir("debug"); // a folder doesn't count
+        assert!(!debug_file_in(dir.path()));
+        std::fs::remove_dir(dir.path().join("debug")).unwrap();
+        dir.write("debug", b"");
+        assert!(debug_file_in(dir.path()));
+    }
 
     #[test]
     fn system_counts_only_with_config_or_our_readme() {
