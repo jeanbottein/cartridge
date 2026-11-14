@@ -309,14 +309,52 @@ fn is_skipped(rel: &Path) -> bool {
     rel.starts_with(GAME_DATA_DIR) || ARCHIVE_JUNK.iter().any(|junk| rel.starts_with(junk))
 }
 
-/// Where the archive's game files start: inside its single top folder
-/// (`Game-v2/...`) unless the game has a folder of that name itself.
-fn content_root(extracted: &Path, game_dir: &Path) -> io::Result<PathBuf> {
-    let entries = fs::read_dir(extracted)?
+/// What an unpacked archive holds at its top, junk left out.
+fn content_entries(dir: &Path) -> io::Result<Vec<fs::DirEntry>> {
+    Ok(fs::read_dir(dir)?
         .collect::<io::Result<Vec<_>>>()?
         .into_iter()
         .filter(|e| !is_skipped(Path::new(&e.file_name())))
-        .collect::<Vec<_>>();
+        .collect())
+}
+
+/// The archive `extracted` holds when it holds nothing else: zips that wrap
+/// a `.tar.gz` so the exec bits survive.
+fn inner_archive(extracted: &Path) -> io::Result<Option<(Archive, PathBuf)>> {
+    let entries = content_entries(extracted)?;
+    let [single] = entries.as_slice() else {
+        return Ok(None);
+    };
+    if !single.file_type()?.is_file() {
+        return Ok(None);
+    }
+    let kind = archive_of(&single.file_name().to_string_lossy());
+    Ok(kind.map(|kind| (kind, single.path())))
+}
+
+/// An empty `dir`, whatever a crash left there.
+fn fresh_dir(dir: &Path) -> Result<(), String> {
+    let _ = fs::remove_dir_all(dir);
+    fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))
+}
+
+/// Unpack `archive` into `outer`, and the archive it wraps, if any, into
+/// `inner`. Returns the folder holding the files.
+fn unpack(kind: Archive, archive: &Path, outer: &Path, inner: &Path) -> Result<PathBuf, String> {
+    fresh_dir(outer)?;
+    extract(kind, archive, outer)?;
+    let Some((inner_kind, wrapped)) = inner_archive(outer).map_err(|e| e.to_string())? else {
+        return Ok(outer.to_path_buf());
+    };
+    fresh_dir(inner)?;
+    extract(inner_kind, &wrapped, inner)?;
+    Ok(inner.to_path_buf())
+}
+
+/// Where the archive's game files start: inside its single top folder
+/// (`Game-v2/...`) unless the game has a folder of that name itself.
+fn content_root(extracted: &Path, game_dir: &Path) -> io::Result<PathBuf> {
+    let entries = content_entries(extracted)?;
     let [single] = entries.as_slice() else {
         return Ok(extracted.to_path_buf());
     };
@@ -439,15 +477,14 @@ pub fn install(
         asset.name
     )));
     let extracted = games_dir.join(package::staging_name(&format!("{name}.update")));
+    let inner = games_dir.join(package::staging_name(&format!("{name}.update-inner")));
     let result = (|| {
         download(asset, &archive, progress)?;
-        let _ = fs::remove_dir_all(&extracted); // leftover from a crash
-        fs::create_dir_all(&extracted).map_err(|e| e.to_string())?;
-        extract(kind, &archive, &extracted)?;
+        let unpacked = unpack(kind, &archive, &extracted, &inner)?;
         if progress.is_cancelled() {
             return Err("cancelled".into());
         }
-        let root = content_root(&extracted, &game.dir).map_err(|e| e.to_string())?;
+        let root = content_root(&unpacked, &game.dir).map_err(|e| e.to_string())?;
         let files = upsert(&root, &game.dir)?;
         log::info!("{}: {files} files from {} ({tag})", game.title, asset.name);
         // The size changed: the run after the update measures it again.
@@ -458,6 +495,7 @@ pub fn install(
     })();
     let _ = fs::remove_file(&archive);
     let _ = fs::remove_dir_all(&extracted);
+    let _ = fs::remove_dir_all(&inner);
     result.map(|()| game.dir.clone())
 }
 
@@ -536,6 +574,30 @@ mod tests {
         assert_eq!(
             name("macos", "arm64").unwrap(),
             "BanjoRecompiled-v1.0.2-macOS.zip"
+        );
+    }
+
+    #[test]
+    fn picks_the_linux_build_of_real_releases() {
+        let starfox = release(&[
+            "SF64Recomp-Dev-Cheats.zip",
+            "Starfox64Recompiled-v1.0.3-Flatpak-X64-Release.zip",
+            "Starfox64Recompiled-v1.0.3-Linux-ARM64-Release.zip",
+            "Starfox64Recompiled-v1.0.3-Linux-X64-Release.zip",
+            "Starfox64Recompiled-v1.0.3-Windows-RelWithDebInfo.zip",
+        ]);
+        assert_eq!(
+            picked(&starfox, "linux", "x64", "").unwrap(),
+            "Starfox64Recompiled-v1.0.3-Linux-X64-Release.zip"
+        );
+        let midas = release(&[
+            "ProjectMidas-v1.0.2b-linux.zip",
+            "ProjectMidas-v1.0.2b-steamdeck.zip",
+            "ProjectMidas-v1.0.2b-windows.zip",
+        ]);
+        assert_eq!(
+            picked(&midas, "linux", "x64", "").unwrap(),
+            "ProjectMidas-v1.0.2b-linux.zip"
         );
     }
 
@@ -715,6 +777,37 @@ mod tests {
         extract(Archive::TarGz, &archive, &dest).unwrap();
         assert_eq!(fs::read(dest.join("data/x")).unwrap(), b"x");
         assert!(platform::has_exec_permission(&dest.join("Game")));
+    }
+
+    #[test]
+    fn a_zip_wrapping_a_tar_gz_unpacks_both_and_keeps_exec_bits() {
+        let dir = TempDir::new();
+        let mut zip = zip::ZipWriter::new(io::Cursor::new(Vec::new()));
+        zip.start_file("Game.tar.gz", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(&tar_gz(&[("Game", b"bin"), ("assets/a", b"a")]))
+            .unwrap();
+        let archive = dir.write("a.zip", &zip.finish().unwrap().into_inner());
+        let (outer, inner) = (dir.path().join("outer"), dir.path().join("inner"));
+        let unpacked = unpack(Archive::Zip, &archive, &outer, &inner).unwrap();
+        assert_eq!(unpacked, inner);
+        assert_eq!(fs::read(inner.join("assets/a")).unwrap(), b"a");
+        assert!(platform::has_exec_permission(&inner.join("Game")));
+    }
+
+    #[test]
+    fn an_archive_with_more_than_an_archive_is_not_unwrapped() {
+        let dir = TempDir::new();
+        let archive = dir.write(
+            "a.tar.gz",
+            &tar_gz(&[("data.zip", b"not unpacked"), ("Game", b"bin")]),
+        );
+        let (outer, inner) = (dir.path().join("outer"), dir.path().join("inner"));
+        assert_eq!(
+            unpack(Archive::TarGz, &archive, &outer, &inner).unwrap(),
+            outer
+        );
+        assert!(!inner.exists());
     }
 
     #[test]
