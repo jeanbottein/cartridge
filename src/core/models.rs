@@ -154,6 +154,15 @@ pub struct Update {
         deserialize_with = "nullable"
     )]
     pub installed: String,
+    /// Fingerprint of the release file last installed (its sha256, else its
+    /// upload date): rolling releases (`nightly`) keep their tag across
+    /// builds. Empty: only the tag is compared.
+    #[serde(
+        default,
+        skip_serializing_if = "String::is_empty",
+        deserialize_with = "nullable"
+    )]
+    pub build: String,
 }
 
 impl Update {

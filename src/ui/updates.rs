@@ -37,7 +37,11 @@ pub enum Event {
         tag: String,
     },
     /// Record this release as installed, without installing anything.
-    MarkInstalled { game: Box<Game>, tag: String },
+    MarkInstalled {
+        game: Box<Game>,
+        tag: String,
+        asset: Option<Asset>,
+    },
 }
 
 /// A focused game's state, as the row chip and the panel show it.
@@ -129,11 +133,16 @@ impl UpdatesScreen {
             None if self.checking.is_some() => Status::Checking,
             None => Status::NotChecked,
             Some(Err(e)) => Status::Failed(e),
-            Some(Ok(release)) if release.tag == game.update.installed => Status::UpToDate(release),
-            Some(Ok(release)) => match updater::asset_for(game, release) {
-                Some(asset) => Status::Available(release, asset),
-                None => Status::NoFile(release),
-            },
+            Some(Ok(release)) => {
+                let asset = updater::asset_for(game, release);
+                match asset {
+                    _ if updater::is_current(&game.update, release, asset) => {
+                        Status::UpToDate(release)
+                    }
+                    Some(asset) => Status::Available(release, asset),
+                    None => Status::NoFile(release),
+                }
+            }
         }
     }
 
@@ -259,12 +268,15 @@ impl UpdatesScreen {
     }
 
     fn mark_installed(&self, game: &Game) -> Option<Event> {
-        let (Status::Available(release, _) | Status::NoFile(release)) = self.status(game) else {
-            return None;
+        let (release, asset) = match self.status(game) {
+            Status::Available(release, asset) => (release, Some(asset.clone())),
+            Status::NoFile(release) => (release, None),
+            _ => return None,
         };
         Some(Event::MarkInstalled {
             game: Box::new(game.clone()),
             tag: release.tag.clone(),
+            asset,
         })
     }
 

@@ -14,7 +14,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use super::app::GAME_DATA_DIR;
-use super::models::Game;
+use super::models::{Game, Update};
 use super::package::{self, Kind, Progress};
 use super::{paths, platform, sgdb};
 
@@ -28,13 +28,15 @@ pub struct Asset {
     pub name: String,
     pub size: u64,
     pub url: String,
+    /// Tells this very file from another build under the same name.
+    pub build: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Release {
     pub tag: String,
     pub name: String,
-    /// `YYYY-MM-DD`, empty when unknown.
+    /// `YYYY-MM-DD` of its latest build, empty when unknown.
     pub date: String,
     pub notes: String,
     pub assets: Vec<Asset>,
@@ -45,6 +47,9 @@ struct GithubAsset {
     name: String,
     size: u64,
     browser_download_url: String,
+    /// `sha256:…`, for files uploaded since 2025.
+    digest: Option<String>,
+    updated_at: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -52,6 +57,8 @@ struct GithubRelease {
     tag_name: String,
     name: Option<String>,
     published_at: Option<String>,
+    /// Moves when CI recreates a rolling release; `published_at` stays.
+    created_at: Option<String>,
     body: Option<String>,
     #[serde(default)]
     assets: Vec<GithubAsset>,
@@ -107,8 +114,10 @@ pub fn parse_release(json: &str) -> Result<Release, String> {
             .filter(|n| !n.trim().is_empty())
             .unwrap_or_else(|| release.tag_name.clone()),
         tag: release.tag_name,
+        // ISO dates sort as text.
         date: release
             .published_at
+            .max(release.created_at)
             .and_then(|d| d.get(..10).map(str::to_string))
             .unwrap_or_default(),
         notes: release.body.unwrap_or_default(),
@@ -116,6 +125,7 @@ pub fn parse_release(json: &str) -> Result<Release, String> {
             .assets
             .into_iter()
             .map(|a| Asset {
+                build: a.digest.or(a.updated_at).unwrap_or_default(),
                 name: a.name,
                 size: a.size,
                 url: a.browser_download_url,
@@ -265,6 +275,19 @@ pub fn platform_of(game: &Game) -> Platform {
         arch: pick(target.map(|t| t.arch.as_str()), platform::arch_tag()),
         target: pick(target.map(|t| t.target.as_str()), ""),
     }
+}
+
+/// The game already runs `asset` of `release`: same tag, and the same file
+/// when the installed one was fingerprinted.
+pub fn is_current(update: &Update, release: &Release, asset: Option<&Asset>) -> bool {
+    let same_file = update.build.is_empty() || asset.is_some_and(|a| a.build == update.build);
+    update.installed == release.tag && same_file
+}
+
+/// Record `asset` of release `tag` as what the game runs.
+fn record(update: &mut Update, tag: &str, asset: Option<&Asset>) {
+    update.installed = tag.to_string();
+    update.build = asset.map(|a| a.build.clone()).unwrap_or_default();
 }
 
 /// The file of `release` to install for `game`.
@@ -513,10 +536,10 @@ fn rewrite_game_json(game: &Game, change: impl FnOnce(&mut Game)) -> Result<(), 
     paths::write_atomic(&path, fresh.to_json()).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// Remember `tag` as the installed release, without installing anything
-/// (the game already is at that release).
-pub fn mark_installed(game: &Game, tag: &str) -> Result<(), String> {
-    rewrite_game_json(game, |g| g.update.installed = tag.to_string())
+/// Remember `asset` of release `tag` as installed, without installing
+/// anything (the game already is at that release).
+pub fn mark_installed(game: &Game, tag: &str, asset: Option<&Asset>) -> Result<(), String> {
+    rewrite_game_json(game, |g| record(&mut g.update, tag, asset))
 }
 
 /// Download `asset` of release `tag` and lay its files over the game (or,
@@ -552,7 +575,7 @@ pub fn install(
         log::info!("{}: {files} files from {} ({tag})", game.title, asset.name);
         // The size changed: the run after the update measures it again.
         rewrite_game_json(game, |g| {
-            g.update.installed = tag.to_string();
+            record(&mut g.update, tag, Some(asset));
             g.size = None;
         })
     })();
@@ -577,6 +600,7 @@ mod tests {
             name: name.into(),
             size: 1,
             url: String::new(),
+            build: format!("sha256:{name}"),
         }
     }
 
@@ -689,6 +713,41 @@ mod tests {
     }
 
     #[test]
+    fn a_file_is_fingerprinted_by_its_digest_else_its_upload_date() {
+        let release = banjo();
+        assert!(release.assets[0].build.starts_with("sha256:53515be8"));
+        let json = r#"{"tag_name": "nightly", "published_at": "2024-05-14T09:41:23Z",
+            "created_at": "2026-08-13T05:51:05Z",
+            "assets": [{"name": "a.tar.gz", "size": 1, "browser_download_url": "u",
+                "updated_at": "2026-08-13T05:58:24Z"}]}"#;
+        let rolling = parse_release(json).unwrap();
+        assert_eq!(rolling.assets[0].build, "2026-08-13T05:58:24Z");
+        assert_eq!(rolling.date, "2026-08-13");
+    }
+
+    #[test]
+    fn a_rolling_release_is_current_only_with_the_same_file() {
+        let release = release(&["Game-linux-x64.tar.gz"]);
+        let file = &release.assets[0];
+        let mut update = Update {
+            installed: "v1".into(),
+            ..Default::default()
+        };
+        assert!(
+            is_current(&update, &release, Some(file)),
+            "tag only: as before"
+        );
+        record(&mut update, "v1", Some(file));
+        assert!(is_current(&update, &release, Some(file)));
+        let rebuilt = Asset {
+            build: "sha256:other".into(),
+            ..file.clone()
+        };
+        assert!(!is_current(&update, &release, Some(&rebuilt)));
+        assert!(!is_current(&update, &release, None));
+    }
+
+    #[test]
     fn picks_the_archive_for_the_os_and_arch() {
         let release = banjo();
         let name = |os, arch| picked(&release, os, arch, "");
@@ -722,6 +781,17 @@ mod tests {
         assert_eq!(
             picked(&starfox, "linux", "x64", "").unwrap(),
             "Starfox64Recompiled-v1.0.3-Linux-X64-Release.zip"
+        );
+        let perfect_dark = release(&[
+            "io.github.perfect_dark_pc_port.perfect_dark.flatpak",
+            "pd-arm64-osx.tar.xz",
+            "pd-i686-linux.tar.gz",
+            "pd-i686-windows.zip",
+            "pd-x86_64-linux.tar.gz",
+        ]);
+        assert_eq!(
+            picked(&perfect_dark, "linux", "x64", "").unwrap(),
+            "pd-x86_64-linux.tar.gz"
         );
         let midas = release(&[
             "ProjectMidas-v1.0.2b-linux.zip",
@@ -967,10 +1037,11 @@ mod tests {
     fn marking_a_release_installed_keeps_the_rest_of_game_json() {
         let dir = TempDir::new();
         let game = installed_game(&dir);
-        mark_installed(&game, "v1.0.2").unwrap();
+        mark_installed(&game, "v1.0.2", Some(&asset("Banjo.tar.gz"))).unwrap();
         let text = fs::read_to_string(game.game_json_path()).unwrap();
         let back = Game::from_json(&game.dir, &text).unwrap();
         assert_eq!(back.update.installed, "v1.0.2");
+        assert_eq!(back.update.build, "sha256:Banjo.tar.gz");
         assert_eq!(back.update.url, game.update.url);
         assert_eq!(back.size, Some(42));
     }

@@ -731,8 +731,8 @@ impl App {
                     updater::install(&game, &asset, &tag, p)
                 });
             }
-            updates::Event::MarkInstalled { game, tag } => {
-                let (message, color) = match updater::mark_installed(&game, &tag) {
+            updates::Event::MarkInstalled { game, tag, asset } => {
+                let (message, color) = match updater::mark_installed(&game, &tag, asset.as_ref()) {
                     Ok(()) => (format!("{}: {tag} installed", game.title), theme::accent()),
                     Err(e) => (e, theme::danger()),
                 };
