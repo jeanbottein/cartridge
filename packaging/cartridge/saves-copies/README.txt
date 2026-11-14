@@ -1,2 +1,2 @@
-Backups of your save files, one folder per game. Save backups are being
-reworked: the app doesn't make them for now.
+Backups of your save files: <game folder>/<save folder>/. Make or restore
+them one game at a time in the app's SAVES tab.

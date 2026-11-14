@@ -12,7 +12,7 @@ label in the app and in Steam.
   games/          one folder per game
   mods/           patches and file replacements
   saves-copies/   backups of your save files
-  saves-links/    links to the live save folders (for Syncthing & co)
+  saves-links/    for links to the live save folders (not built for now)
 
 START
   Launch the app and put each game in its own folder in games/: the app

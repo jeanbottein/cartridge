@@ -18,6 +18,7 @@ mod list;
 mod mods;
 mod music;
 mod network;
+mod saves;
 mod settings;
 mod setup;
 mod style;

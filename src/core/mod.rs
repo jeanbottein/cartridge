@@ -19,8 +19,9 @@ pub mod persister;
 pub mod pipeline;
 pub mod platform;
 pub mod proton;
-// Not run by the autopilot: backups wait for their rework.
+// Not built for now: the links tree waits for its own rework.
 #[allow(dead_code)]
+pub mod save_links;
 pub mod saver;
 pub mod scanner;
 pub mod sgdb;

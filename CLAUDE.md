@@ -21,7 +21,7 @@ core::pipeline::Pipeline (one fixed sequence; each phase only does what is missi
     steam_self::register     #   + •cartridge itself (STEAM_ADD_SELF)
  7. manifest::write          # manifests.json (MANIFEST_EXPORT)
  8. mods::run                # Keep the mods the user turned on applied (system/mods.json)
- (saver.rs: backup/restore saves, symlink tree. Not run until the backup rework)
+ (saver.rs: per-game save backup/restore, by hand from the SAVES tab, never by the pipeline)
 ```
 
 Migrations: `launch_manifest.json` → `.cartridge/game.json`, nested → flat `savePaths`, arch `x86_64` → `x64`. Add new ones to `migrations::run_all`; keep them idempotent.
@@ -42,7 +42,9 @@ src/
     share/               # LAN sharing: server.rs (HTTP, GET only), discovery.rs (UDP broadcast), client.rs
     vdf.rs               # Binary (shortcuts.vdf) + text (config.vdf) KeyValues
     steam/               # users, selection (steam.json), host (detect/restart), shortcuts (vdf), clean, export, compat (Proton builds)
-    steam_self.rs manifest.rs bps.rs saver.rs
+    steam_self.rs manifest.rs bps.rs
+    saver.rs             # SAVES: saves-copies/<game folder>/<save folder>/; backup under a hidden name, renamed once complete; restore empties then copies
+    save_links.rs        # saves-links/ symlink tree (not built for now)
     proton.rs            # Windows games with Steam's Proton + runtime, in the shortcut's compatdata prefix; winetricks
     patcher.rs mods.rs   # mod file engine (state/apply/restore) + mod model (list, on/off)
     pipeline.rs init.rs logging.rs
@@ -53,6 +55,7 @@ src/
     form.rs list.rs keyboard.rs browser.rs dialog.rs   # widgets
     network.rs jobs.rs info.rs   # Network tab, background transfers, shared info panel
     mods.rs              # MODS tab: mods with status, A turns one on/off
+    saves.rs             # SAVES tab: device and backup cards of the focused game, A back up / X restore (confirmed)
     style.rs             # Shared look: backdrop, cards, highlight, panels, bars, toasts, chips, badges
     covers.rs launcher.rs music.rs
     engine/              # canvas (design px, drawn at native res), input, text, shape, theme
@@ -77,9 +80,9 @@ Packages: a plain tar of `Foo/` with `.cartridge/package.json` first and `.cartr
 
 ## Key Conventions
 
-- **Compatibility is the contract:** game.json (4-space JSON), shortcuts.vdf, AppIDs (`crc32(exe+title) | 0x80000000`, computed once and kept in game.json `steam_appid` so a rename keeps the shortcut, Proton prefix and saves: always go through `steam::appid_for`/`appid_of`), path normalization and save layout must stay byte-compatible with existing cartridges. Golden tests in `testdata/` guard this.
+- **Compatibility is the contract:** game.json (4-space JSON), shortcuts.vdf, AppIDs (`crc32(exe+title) | 0x80000000`, computed once and kept in game.json `steam_appid` so a rename keeps the shortcut, Proton prefix and saves: always go through `steam::appid_for`/`appid_of`), path normalization must stay byte-compatible with existing cartridges. Save backups are `saves-copies/<game folder>/<save folder>/` (folder names survive a rename). Golden tests in `testdata/` guard this.
 - **Fixed layout, no path settings:** `games/`, `mods/`, `saves-copies/`, `saves-links/` sit next to `system/` (`core::app::FOLDERS`, `Config::games_dir()`/`mods_dir()`/...). Users who want a folder elsewhere replace it with a symlink.
-- **`Config`** keeps raw values (Settings editor) and resolved values (only `BACKUP_*` sources are paths, resolved against the cartridge folder).
+- **`Config`** holds the values as typed in `config.txt` (no value is a path).
 - **UI look:** layout is in design pixels (432 px tall canvas), rendered at the window's native resolution, so 480p and 4K share one layout. Screens draw through `ui::style` and `theme::*()` colors, never raw colors; `THEME` (Settings > DISPLAY) swaps palette, typeface and corners, never positions. Add a theme to `engine::theme::THEMES`. `WINDOW_MODE`: borderless (fullscreen, default) or a resizable window; gamescope is always fullscreen.
 - **Windows games:** the UI runs them itself with Steam's Proton (`core::proton`), the way Steam runs the shortcut (runtime `_v2-entry-point` → `proton waitforexitandrun`, `STEAM_COMPAT_DATA_PATH=compatdata/<shortcut appid>`), so prefix and saves are shared with the Steam shortcut. Per-game settings: `"proton": {version, winetricks, env}` in game.json. Build: game.json `version` → the shortcut's own `CompatToolMapping` entry → Steam's default (`0`) → newest Proton (`proton::Installed::tool_for`), so Steam and cartridge share the prefix's build. A non-empty `env` (plain names only: Steam runs LaunchOptions in a shell) owns the shortcut's LaunchOptions; otherwise options set in Steam are kept. `version` pins the shortcut's compat tool only when installed. winetricks downloads: `W_CACHE` is `system/winetricks` with `PROTON_KEEP_DOWNLOADS`, else the user cache with links to what `system/winetricks` holds.
 - **Debug mode:** a file named `debug` next to the app (`core::app::debug_mode`) shows Settings > DEBUG; `DEBUG_*` keys apply only then. They are interface-only (`DEBUG_FAKE_PROGRESS` loops a fake progress card, drawn by the UI; the autopilot never sees it).
@@ -87,7 +90,7 @@ Packages: a plain tar of `Foo/` with `.cartridge/package.json` first and `.cartr
 - **Steam, per game:** the user adds/removes each game (Library, Y), remembered in `system/steam.json`; the pipeline keeps exactly those shortcuts current. Ownership tag `cartridge:<id>` (`system/cartridge-id`) plus the folder-name label as a visible tag; the self-shortcut (`STEAM_ADD_SELF`, first SETTINGS option) uses `<owner tag>-self` and is applied as soon as it's toggled. Steam reads shortcuts at startup: the UI says "restart Steam" when it runs.
 - **Shared files:** the autopilot runs while the UI stays usable, so every writer of Steam's files takes `steam::files_lock()` and every mod apply/restore takes the lock in `mods`. Opening the editor pauses the autopilot.
 - **Logging:** `log` macros; `core::logging` prints to stderr, or to the systemd journal (`journalctl --user -t cartridge`) when stderr is no terminal; the UI toasts warnings and errors. No log file.
-- **Minimal dependencies:** macroquad, gilrs (feature `gamepad`), rodio (feature `music`, ALSA at build time), serde/serde_json, image, ureq, crc32fast, tar, log.
+- **Minimal dependencies:** macroquad, gilrs (feature `gamepad`), rodio (feature `music`, ALSA at build time), serde/serde_json, image, ureq, crc32fast, tar, log, chrono (`clock` only: local save dates).
 
 ## Dev Workflow
 

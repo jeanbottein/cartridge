@@ -20,6 +20,7 @@ use super::library::{self, Library};
 use super::mods::ModsScreen;
 use super::music::{self, Music};
 use super::network::{self, Network};
+use super::saves::SavesScreen;
 use super::settings::Settings;
 use super::setup::{self, Setup};
 use super::{style, wants_fullscreen, Hint, Ui};
@@ -62,13 +63,15 @@ const RESUME_GRACE_SECS: f64 = 0.6;
 enum Tab {
     Library,
     Network,
+    Saves,
     Mods,
     Settings,
 }
 
-const TABS: [(Tab, &str); 4] = [
+const TABS: [(Tab, &str); 5] = [
     (Tab::Library, "LIBRARY"),
     (Tab::Network, "NETWORK"),
+    (Tab::Saves, "SAVES"),
     (Tab::Mods, "MODS"),
     (Tab::Settings, "SETTINGS"),
 ];
@@ -92,6 +95,7 @@ pub struct App {
     fullscreen: bool,
     library: Library,
     network: Network,
+    saves: SavesScreen,
     mods: ModsScreen,
     /// File transfers running in the background (unpack, pack, copies).
     jobs: Jobs,
@@ -131,6 +135,7 @@ impl App {
             fullscreen,
             library: Library::default(),
             network: Network::default(),
+            saves: SavesScreen::default(),
             mods: ModsScreen::default(),
             jobs: Jobs::default(),
             editor: None,
@@ -311,6 +316,7 @@ impl App {
         self.library.poll();
         self.network.poll(self.config.as_ref());
         self.mods.poll(self.config.as_ref());
+        self.saves.poll();
         if let Some(music) = &mut self.music {
             music.update(get_frame_time(), self.session.is_some());
         }
@@ -419,6 +425,7 @@ impl App {
         self.quit_dialog.is_some()
             || self.editor.is_some()
             || self.network.has_modal()
+            || self.saves.has_modal()
             || self.setup.is_some()
             || self.settings.as_ref().is_some_and(Settings::has_modal)
     }
@@ -433,14 +440,26 @@ impl App {
         if self.modal_open() {
             return;
         }
+        let before = self.tab;
+        self.switch_tabs();
+        if self.tab == Tab::Saves && before != Tab::Saves {
+            self.saves.forget(); // a game may have saved since
+        }
+    }
+
+    fn switch_tabs(&mut self) {
         if self.tab != Tab::Library && self.ui.action(Action::Back) {
             self.tab = Tab::Library;
             self.back_held_over = true; // the same press must not count toward hold-to-quit
         }
-        for (key, (tab, _)) in [KeyCode::Key1, KeyCode::Key2, KeyCode::Key3, KeyCode::Key4]
-            .iter()
-            .zip(TABS)
-        {
+        let keys = [
+            KeyCode::Key1,
+            KeyCode::Key2,
+            KeyCode::Key3,
+            KeyCode::Key4,
+            KeyCode::Key5,
+        ];
+        for (key, (tab, _)) in keys.iter().zip(TABS) {
             if is_key_pressed(*key) {
                 self.tab = tab;
             }
@@ -511,6 +530,11 @@ impl App {
         match self.tab {
             Tab::Library => self.update_library(area),
             Tab::Network => self.update_network(area),
+            Tab::Saves => {
+                if let Some(cfg) = &self.config {
+                    self.saves.update(&self.ui, area, &self.library.games, cfg);
+                }
+            }
             Tab::Mods => {
                 if let Some(cfg) = &self.config {
                     self.mods.update(&self.ui, area, cfg);
@@ -717,6 +741,7 @@ impl App {
                 self.network
                     .draw(&self.ui, area, self.config.as_ref(), &self.jobs)
             }
+            (None, Tab::Saves, _) => self.saves.draw(&self.ui, area, &self.library.games),
             (None, Tab::Mods, _) => self.mods.draw(&self.ui, area, self.config.as_ref()),
             (None, Tab::Settings, _) => {
                 if let Some(settings) = &self.settings {
@@ -865,6 +890,10 @@ impl App {
                 });
                 hints
             }
+            (Tab::Saves, _) if self.saves.has_modal() => {
+                return self.saves.hints(ui, &self.library.games)
+            }
+            (Tab::Saves, _) => self.saves.hints(ui, &self.library.games),
             (Tab::Mods, _) => self.mods.hints(ui),
             (Tab::Settings, _) => match &self.settings {
                 Some(settings) if settings.has_modal() => return settings.hints(ui),

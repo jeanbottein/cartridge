@@ -38,29 +38,7 @@
 
 
 # ==========================================
-# 2. SAVE BACKUP & SYNC
-# ==========================================
-
-# Saves are copied into saves-copies/ and linked from saves-links/ (point
-# Syncthing or similar at saves-links/ for automatic sync).
-# SAVESCOPY_STRATEGY
-# backup: Create a backup of save files in saves-copies/
-# sync: Synchronize save files between the original and backup locations
-# restore: Restore save files from saves-copies/ to the original location
-# (Dangerous, use with caution, will replace save files with backup files, each time the script is run)
-# (Removing a game from games/ will not remove its backup or link)
-# Default: backup
-#SAVESCOPY_STRATEGY=backup
-
-# Custom directory backups (optional): folders outside the cartridge to back up too
-# Format: BACKUP_<name>=<path>  (relative paths start at the cartridge folder)
-# The <name> becomes the backup folder name under saves-copies/
-# Example: BACKUP_gamescope-shaders=/home/deck/.local/share/gamescope/reshade/Shaders
-#BACKUP_gamescope-shaders=/home/deck/.local/share/gamescope/reshade/Shaders
-
-
-# ==========================================
-# 3. GAME LAUNCHERS & INTEGRATION
+# 2. GAME LAUNCHERS & INTEGRATION
 # ==========================================
 
 # Games in Steam: choose per game in the Library (Y), remembered in
@@ -97,7 +75,7 @@
 
 
 # ==========================================
-# 4. SHARING ON THE LAN
+# 3. SHARING ON THE LAN
 # ==========================================
 
 # Let other •cartridge machines on the network see and copy your games (optional).
@@ -114,7 +92,7 @@
 
 
 # ==========================================
-# 5. DEBUG
+# 4. DEBUG
 # ==========================================
 
 # Only with a file named "debug" next to the app (debug mode): then SETTINGS

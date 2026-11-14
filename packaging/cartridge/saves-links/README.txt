@@ -1,2 +1,2 @@
-Links to the live save folders of your games, rebuilt by the pipeline.
-Point Syncthing (or similar) here to sync saves between machines.
+Meant for links to the live save folders of your games, to sync them with
+Syncthing (or similar). The app doesn't build them for now.

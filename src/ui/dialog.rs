@@ -1,4 +1,4 @@
-//! A modal choice: a message and a few options.
+//! A modal choice: a message (lines kept, each wrapped) and a few options.
 
 use macroquad::prelude::*;
 
@@ -37,7 +37,11 @@ impl Dialog {
 
     fn layout(&self, ui: &Ui, area: Rect) -> (Rect, Vec<String>, Rect) {
         let width = 380.0f32.min(area.w - 20.0);
-        let lines = ui.wrap(&self.message, width - 24.0);
+        let lines: Vec<String> = self
+            .message
+            .lines()
+            .flat_map(|line| ui.wrap(line, width - 24.0))
+            .collect();
         let height =
             40.0 + lines.len() as f32 * 20.0 + 10.0 + self.options.len() as f32 * ROW + 10.0;
         let frame = centered(area, width, height);

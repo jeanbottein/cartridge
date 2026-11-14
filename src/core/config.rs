@@ -1,28 +1,21 @@
 //! `system/config.txt`: `KEY=value` lines, `#` comments (whole-line and
 //! inline). The cartridge's folders are fixed (`games/`, `mods/`, ... next to
-//! `system/`); only `BACKUP_*` sources are paths, and may be relative to the
-//! cartridge folder. Raw text values are kept for the Settings editor, which
-//! rewrites the file preserving comments.
+//! `system/`): no value is a path. The Settings editor rewrites the file
+//! preserving comments.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use super::app::{GAMES_DIR, MODS_DIR, SAVES_COPIES_DIR, SAVES_LINKS_DIR};
+use super::app::{GAMES_DIR, MODS_DIR, SAVES_COPIES_DIR};
 use super::paths;
 
 pub const DEFAULT_CONFIG: &str = include_str!("../../assets/config-default.txt");
-
-/// `BACKUP_<name>=<path>`: an extra folder (outside the cartridge) to back up.
-pub fn is_path_key(key: &str) -> bool {
-    key.starts_with("BACKUP_")
-}
 
 #[derive(Clone, Debug)]
 pub struct Config {
     /// The `config.txt` file.
     pub path: PathBuf,
     raw: BTreeMap<String, String>,
-    values: BTreeMap<String, String>,
 }
 
 impl Config {
@@ -41,26 +34,17 @@ impl Config {
     }
 
     pub fn from_raw(path: PathBuf, raw: BTreeMap<String, String>) -> Config {
-        let cartridge = cartridge_dir_of(&path);
-        let values = raw
-            .iter()
-            .map(|(k, v)| (k.clone(), resolve_value(&cartridge, k, v)))
-            .collect();
-        Config { path, raw, values }
+        Config { path, raw }
     }
 
-    /// Resolved value, if set and non-empty.
+    /// Value, if set and non-empty.
     pub fn get(&self, key: &str) -> Option<&str> {
-        self.values.get(key).map(String::as_str)
+        self.raw.get(key).map(String::as_str)
     }
 
-    /// Value as typed in `config.txt` (unresolved).
+    /// Every value, as typed in `config.txt`.
     pub fn raw(&self) -> &BTreeMap<String, String> {
         &self.raw
-    }
-
-    pub fn values(&self) -> &BTreeMap<String, String> {
-        &self.values
     }
 
     /// Opt-in flag: true only when set to `true` (any case).
@@ -111,10 +95,6 @@ impl Config {
     pub fn saves_copies_dir(&self) -> PathBuf {
         self.cartridge_dir().join(SAVES_COPIES_DIR)
     }
-
-    pub fn saves_links_dir(&self) -> PathBuf {
-        self.cartridge_dir().join(SAVES_LINKS_DIR)
-    }
 }
 
 fn cartridge_dir_of(config_path: &Path) -> PathBuf {
@@ -123,15 +103,6 @@ fn cartridge_dir_of(config_path: &Path) -> PathBuf {
         .and_then(Path::parent)
         .map(Path::to_path_buf)
         .unwrap_or_default()
-}
-
-fn resolve_value(cartridge: &Path, key: &str, value: &str) -> String {
-    // `~` and `$VAR` are expanded by the saver: only a path that stays
-    // relative once expanded is relative to the cartridge.
-    if !is_path_key(key) || paths::expand(value).is_absolute() {
-        return value.to_string();
-    }
-    paths::lossy(&paths::resolve(&cartridge.join(value)))
 }
 
 /// Parse `KEY=value` lines, ignoring comments and empty values.
@@ -217,29 +188,10 @@ mod tests {
     }
 
     #[test]
-    fn backup_sources_resolve_against_the_cartridge() {
-        let raw = parse("BACKUP_x=emu/saves\nBACKUP_y=/abs\n");
-        let cfg = Config::from_raw(PathBuf::from("/ws/system/config.txt"), raw);
-        // Resolved like the code does, so `/ws` reads `D:\ws` on Windows.
-        let resolved = |p: &str| paths::lossy(&paths::resolve(Path::new(p)));
-        assert_eq!(
-            cfg.get("BACKUP_x"),
-            Some(resolved("/ws/emu/saves").as_str())
-        );
-        assert_eq!(cfg.get("BACKUP_y"), Some(resolved("/abs").as_str()));
-        assert_eq!(cfg.raw()["BACKUP_x"], "emu/saves");
+    fn folders_sit_next_to_system() {
+        let cfg = Config::from_raw(PathBuf::from("/ws/system/config.txt"), BTreeMap::new());
         assert_eq!(cfg.mods_dir(), Path::new("/ws/mods"));
-    }
-
-    #[test]
-    fn backup_sources_under_home_are_left_for_the_saver_to_expand() {
-        let raw = parse("BACKUP_x=~/Emulation/saves\nBACKUP_y=$HOME/saves\n");
-        let cfg = Config::from_raw(PathBuf::from("/ws/system/config.txt"), raw);
-        assert_eq!(cfg.get("BACKUP_x"), Some("~/Emulation/saves"));
-        // Windows has no HOME (USERPROFILE instead).
-        if cfg!(unix) {
-            assert_eq!(cfg.get("BACKUP_y"), Some("$HOME/saves"));
-        }
+        assert_eq!(cfg.saves_copies_dir(), Path::new("/ws/saves-copies"));
     }
 
     #[test]
