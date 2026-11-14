@@ -166,7 +166,7 @@ fn replaces_nothing(report: &Report, direction: Direction) -> bool {
 /// Why nothing can be done, when the cards don't already say it.
 fn note(shown: &Shown) -> Option<&str> {
     let report = &shown.report;
-    if shown.saves.folders.is_empty() || report.none_found(&shown.saves) {
+    if shown.saves.folders.is_empty() || report.none_found {
         return report.cannot_back_up.as_deref();
     }
     let backup = report
@@ -434,7 +434,7 @@ fn draw_panel(ui: &Ui, panel: Rect, shown: &Shown) {
     let no_path = shown.saves.folders.is_empty();
     let device_empty = if no_path {
         "NO SAVE PATH"
-    } else if shown.report.none_found(&shown.saves) {
+    } else if shown.report.none_found {
         "NOT FOUND"
     } else {
         "NO SAVE"
@@ -529,6 +529,7 @@ mod tests {
             cannot_back_up: None,
             cannot_restore: None,
             missing: Vec::new(),
+            none_found: false,
         }
     }
 

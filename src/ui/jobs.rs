@@ -63,9 +63,14 @@ impl Job {
         (self.progress.done() as f64 / total as f64).min(1.0) as f32
     }
 
-    /// `45% · 3.2 GB / 9.1 GB · 45.0 MB/s · ~2 min`
+    /// `45% · 3.2 GB / 9.1 GB · 45.0 MB/s · ~2 min`; `9.1 GB · finishing...`
+    /// once every byte is counted but the job still runs (an update unpacks
+    /// what it downloaded).
     pub fn summary(&self) -> String {
         let (done, total) = (self.progress.done(), self.progress.total());
+        if total > 0 && done >= total {
+            return format!("{} · finishing...", sizer::human(total));
+        }
         let elapsed = (get_time() - self.started).max(0.001);
         let rate = done as f64 / elapsed;
         let mut parts = vec![

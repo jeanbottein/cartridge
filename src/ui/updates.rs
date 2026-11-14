@@ -19,7 +19,7 @@ use super::style::{self, Toast};
 use super::{draw_spinner, Hint, Ui};
 use crate::core::models::Game;
 use crate::core::sizer;
-use crate::core::updater::{self, Asset, Release};
+use crate::core::updater::{self, Asset, Platform, Release};
 
 const ROW_H: f32 = 26.0;
 const ROW_STEP: f32 = 30.0;
@@ -75,11 +75,21 @@ struct Confirm {
     tag: String,
 }
 
+/// The release file picked for a game, and what it was picked for: picked
+/// again only when the game's platform or `asset` pattern changes.
+struct Pick {
+    platform: Platform,
+    pattern: String,
+    asset: Option<Asset>,
+}
+
 #[derive(Default)]
 pub struct UpdatesScreen {
     list: List,
     /// The latest release of each game (by folder name), as last checked.
     releases: BTreeMap<String, Result<Release, String>>,
+    /// The file of each checked release to install (by folder name).
+    picks: BTreeMap<String, Pick>,
     /// The check running in the background, one answer per game.
     checking: Option<Receiver<(String, Result<Release, String>)>>,
     checked_at: Option<f64>,
@@ -134,7 +144,10 @@ impl UpdatesScreen {
             None => Status::NotChecked,
             Some(Err(e)) => Status::Failed(e),
             Some(Ok(release)) => {
-                let asset = updater::asset_for(game, release);
+                let asset = self
+                    .picks
+                    .get(&game.folder_name)
+                    .and_then(|p| p.asset.as_ref());
                 match asset {
                     _ if updater::is_current(&game.update, release, asset) => {
                         Status::UpToDate(release)
@@ -178,12 +191,49 @@ impl UpdatesScreen {
             }
         });
         self.releases.clear();
+        self.picks.clear();
         self.checking = Some(rx);
         self.checked_at = Some(get_time());
     }
 
-    /// Collect the answers that arrived.
-    pub fn poll(&mut self) {
+    /// Collect the answers that arrived, and pick the file of each release
+    /// for its game (every frame, whatever the tab: the tab icon shows a dot
+    /// for an available update).
+    pub fn poll(&mut self, games: &[Game]) {
+        self.receive();
+        self.pick(games);
+    }
+
+    /// Pick again the file of the releases whose game changed platform or
+    /// pattern, or that have none picked yet.
+    fn pick(&mut self, games: &[Game]) {
+        let picked: Vec<(String, Pick)> = sources(games)
+            .into_iter()
+            .filter_map(|game| {
+                let Some(Ok(release)) = self.releases.get(&game.folder_name) else {
+                    return None;
+                };
+                let platform = updater::platform_of(game);
+                let pattern = &game.update.asset;
+                let fresh = self
+                    .picks
+                    .get(&game.folder_name)
+                    .is_some_and(|p| p.platform == platform && p.pattern == *pattern);
+                if fresh {
+                    return None;
+                }
+                let pick = Pick {
+                    asset: updater::pick_asset(release, &platform, pattern).cloned(),
+                    platform,
+                    pattern: pattern.clone(),
+                };
+                Some((game.folder_name.clone(), pick))
+            })
+            .collect();
+        self.picks.extend(picked);
+    }
+
+    fn receive(&mut self) {
         let Some(rx) = &self.checking else { return };
         loop {
             match rx.try_recv() {

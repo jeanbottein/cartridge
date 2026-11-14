@@ -336,7 +336,7 @@ impl App {
         self.network.poll(self.config.as_ref());
         self.mods.poll(self.config.as_ref());
         self.saves.poll();
-        self.updates.poll();
+        self.updates.poll(&self.library.games);
         if let Some(music) = &mut self.music {
             music.update(get_frame_time(), self.session.is_some());
         }
@@ -708,7 +708,8 @@ impl App {
     }
 
     /// Updates write game.json: only while the autopilot doesn't (its
-    /// persister would put back what it read before), and paused at once.
+    /// persister would put back what it read before), paused in the same
+    /// step. `collect_runs` keeps it paused while the update job runs.
     fn update_updates(&mut self, area: Rect) {
         let Some(event) = self
             .updates
@@ -716,16 +717,13 @@ impl App {
         else {
             return;
         };
-        if self.updating() {
+        if !self.autopilot.as_ref().is_none_or(Autopilot::pause_if_idle) {
             let wait = "The library is being updated, one moment...";
             self.updates.toast.show(wait, theme::secondary());
             return;
         }
         match event {
             updates::Event::Install { game, asset, tag } => {
-                if let Some(autopilot) = &self.autopilot {
-                    autopilot.set_paused(true);
-                }
                 let (id, title) = (game.folder_name.clone(), game.title.clone());
                 self.jobs.start(Kind::Update, &id, &title, move |p| {
                     updater::install(&game, &asset, &tag, p)

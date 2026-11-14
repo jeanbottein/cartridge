@@ -29,7 +29,8 @@ Potato-games/          # any name: the cartridge's label
 - **Steam shortcuts** — adds games, or the cartridge itself, to Steam as non-Steam shortcuts, complete with artwork, and sets Proton for Windows games
 - **Proton support** — plays Windows games on Linux with Steam's own Proton, in the same prefix as their Steam shortcut
 - **Steam ROM Manager integration** — generates `manifests.json` for [Steam ROM Manager](https://github.com/SteamGridDB/steam-rom-manager)
-- **Patch** — applies BPS patches or file replacements via `patch.json`
+- **Mods** — the MODS tab turns each mod in `mods/` (a folder with a `patch.json`: BPS patches or file replacements) on or off; mods turned on stay applied
+- **Game updates** — games whose `game.json` names a GitHub page get their new releases from the UPDATES tab: checked only when you ask, the file for your platform is laid over the game's folder (nothing is deleted: saves, settings and ROMs stay), or an AppImage replaces the game's executable
 - **Save backup** — the SAVES tab shows each game's saves on this machine and in its backup, with the date and time of each; back them up or restore them by hand, like two memory cards
 - **LAN sharing** — packs games into `.cartridge.tar` and copies them between cartridges on the local network; `--serve` runs a headless library machine
 - **Retro UI** — browse and launch games, edit every game (targets, save paths, artwork), and change every setting — with a gamepad (on-screen keyboard included), keyboard or mouse

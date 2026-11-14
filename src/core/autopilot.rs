@@ -9,7 +9,6 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -140,12 +139,43 @@ enum Command {
     Run,
 }
 
+/// Paused and running under one lock: the UI can pause only an idle worker
+/// and the worker can start only unpaused, with no gap between the check
+/// and the change.
+#[derive(Default)]
+struct Gate {
+    paused: bool,
+    running: bool,
+}
+
+// Each method checks and changes in one step (a check-and-set, not CQS):
+// that one step under the lock is the point.
+impl Gate {
+    /// Pause unless a run is in progress. Returns whether it paused.
+    fn pause_if_idle(&mut self) -> bool {
+        self.paused |= !self.running;
+        !self.running
+    }
+
+    /// Start a run unless paused. Returns whether it started.
+    fn begin(&mut self) -> bool {
+        self.running = !self.paused;
+        self.running
+    }
+}
+
+type SharedGate = Arc<Mutex<Gate>>;
+
+fn lock(gate: &SharedGate) -> std::sync::MutexGuard<'_, Gate> {
+    gate.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// The worker thread and how to steer it. Dropping it stops the thread
 /// after its current phase.
 pub struct Autopilot {
     commands: Sender<Command>,
     reports: Receiver<Summary>,
-    paused: Arc<AtomicBool>,
+    gate: SharedGate,
     /// The step of the run in progress; `None` when idle.
     step: Arc<Mutex<Option<Step>>>,
 }
@@ -155,21 +185,21 @@ impl Autopilot {
     pub fn start(cfg: Config) -> Autopilot {
         let (commands, inbox) = channel();
         let (outbox, reports) = channel();
-        let paused = Arc::new(AtomicBool::new(false));
+        let gate = SharedGate::default();
         let step = Arc::new(Mutex::new(None));
         let worker = Worker {
             watcher: Watcher::new(&cfg.cartridge_dir().join(GAMES_DIR)),
             cfg,
             inbox,
             outbox,
-            paused: Arc::clone(&paused),
+            gate: Arc::clone(&gate),
             step: Arc::clone(&step),
         };
         std::thread::spawn(move || worker.work());
         Autopilot {
             commands,
             reports,
-            paused,
+            gate,
             step,
         }
     }
@@ -188,11 +218,18 @@ impl Autopilot {
     /// checked; a run in progress stops after its current phase and starts
     /// over once resumed.
     pub fn set_paused(&self, paused: bool) {
-        self.paused.store(paused, Ordering::Relaxed);
+        lock(&self.gate).paused = paused;
+    }
+
+    /// Pause now if no run is in progress, so the caller can write what a
+    /// run writes (game.json). Returns whether it paused: a check and a
+    /// change under one lock, the worker can't start in between.
+    pub fn pause_if_idle(&self) -> bool {
+        lock(&self.gate).pause_if_idle()
     }
 
     pub fn is_running(&self) -> bool {
-        self.progress().is_some()
+        lock(&self.gate).running
     }
 
     /// The step of the run in progress.
@@ -216,20 +253,26 @@ struct Worker {
     watcher: Watcher,
     inbox: Receiver<Command>,
     outbox: Sender<Summary>,
-    paused: Arc<AtomicBool>,
+    gate: SharedGate,
     step: Arc<Mutex<Option<Step>>>,
 }
 
 impl Worker {
     fn paused(&self) -> bool {
-        self.paused.load(Ordering::Relaxed)
+        lock(&self.gate).paused
+    }
+
+    /// Mark a run started, unless paused.
+    fn begin(&self) -> bool {
+        lock(&self.gate).begin()
     }
 
     fn work(mut self) {
         let (mut wanted, mut folder_changed) = (true, false);
         loop {
-            if wanted && !self.paused() {
+            if wanted && self.begin() {
                 let mut summary = self.run();
+                lock(&self.gate).running = false;
                 summary.games_changed |= folder_changed;
                 // A run stopped early starts over, still owing the folder change.
                 wanted = !summary.completed;
@@ -265,6 +308,21 @@ mod tests {
 
     fn watching(dir: &TempDir) -> Watcher {
         Watcher::new(&dir.mkdir("games"))
+    }
+
+    #[test]
+    fn an_idle_worker_is_paused_and_then_cannot_start() {
+        let mut gate = Gate::default();
+        assert!(gate.pause_if_idle());
+        assert!(!gate.begin());
+    }
+
+    #[test]
+    fn a_running_worker_is_not_paused() {
+        let mut gate = Gate::default();
+        assert!(gate.begin());
+        assert!(!gate.pause_if_idle());
+        assert!(!gate.paused);
     }
 
     #[test]

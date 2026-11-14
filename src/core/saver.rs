@@ -269,17 +269,8 @@ pub struct Report {
     /// Save folders not on disk: the game hasn't saved yet, or the path is
     /// wrong (an absolute path from another machine).
     pub missing: Vec<PathBuf>,
-}
-
-impl Report {
-    /// None of the save folders exist.
-    pub fn none_found(&self, saves: &Saves) -> bool {
-        none_found(saves, &self.missing)
-    }
-}
-
-fn none_found(saves: &Saves, missing: &[PathBuf]) -> bool {
-    !saves.folders.is_empty() && missing.len() == saves.folders.len()
+    /// The game has save folders and none of them exist.
+    pub none_found: bool,
 }
 
 const NO_SAVES: &str = "No saves to back up yet.";
@@ -296,13 +287,20 @@ pub fn report(saves: &Saves) -> Report {
         .map(|f| f.device.clone())
         .filter(|device| !device.is_dir())
         .collect();
-    let empty = if none_found(saves, &missing) { NOT_FOUND } else { NO_SAVES };
+    let none_found = !saves.folders.is_empty() && missing.len() == saves.folders.len();
+    // A Windows game whose prefix isn't made yet: that is why, not the path.
+    let empty = if none_found {
+        missing_prefix(saves).unwrap_or_else(|| NOT_FOUND.into())
+    } else {
+        NO_SAVES.into()
+    };
     let refused = refusal(saves);
     Report {
         missing,
+        none_found,
         cannot_back_up: refused
             .clone()
-            .or_else(|| device.is_none().then(|| empty.into())),
+            .or_else(|| device.is_none().then_some(empty)),
         cannot_restore: refused
             .or_else(|| backup.is_none().then(|| NO_BACKUP.into()))
             .or_else(|| missing_prefix(saves)),
@@ -595,7 +593,10 @@ mod tests {
     fn no_save_folder_on_disk_says_the_save_path_may_be_wrong() {
         let dir = TempDir::new();
         let report = report(&saves(&dir, &game(&dir, &["gone"])));
-        assert!(report.cannot_back_up.unwrap().starts_with("Save folder not found"));
+        assert!(report
+            .cannot_back_up
+            .unwrap()
+            .starts_with("Save folder not found"));
     }
 
     #[test]
@@ -784,5 +785,20 @@ mod tests {
         std::fs::create_dir_all(&prefix).unwrap();
         restore(&saves).unwrap();
         assert_eq!(read(prefix.join("Saves/a.sav")), "a");
+    }
+
+    #[test]
+    fn saves_not_found_before_the_prefix_exists_ask_to_launch_the_game() {
+        let dir = TempDir::new();
+        let saves = Saves {
+            prefix: Some(dir.path().join("compatdata/1/pfx/drive_c")),
+            ..saves(&dir, &game(&dir, &["compatdata/1/pfx/drive_c/Saves"]))
+        };
+        let report = report(&saves);
+        assert!(report.none_found);
+        assert!(report
+            .cannot_back_up
+            .unwrap()
+            .starts_with("Launch the game once"));
     }
 }

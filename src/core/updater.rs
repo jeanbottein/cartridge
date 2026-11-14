@@ -1,10 +1,10 @@
 //! Game updates from GitHub releases (`"update"` in game.json): read the
 //! latest release, pick its file for the game's platform, and lay that
 //! archive's files over the game folder (a release file that is the program
-//! itself, like an AppImage, replaces the game's executable). Like an installer run over an older
-//! install, it only adds and replaces files: nothing is deleted, so saves,
-//! settings, ROMs and mods the game keeps in its folder stay. `.cartridge/`
-//! is never written by the archive.
+//! itself, like an AppImage, replaces the game's executable). Like an
+//! installer run over an older install, it only adds and replaces files:
+//! nothing is deleted, so saves, settings, ROMs and mods the game keeps in
+//! its folder stay. `.cartridge/` is never written by the archive.
 
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
@@ -171,9 +171,13 @@ const OS_WORDS: [(&str, &[&str]); 3] = [
     ("windows", &["windows", "win64", "win32", "win"]),
     ("macos", &["macos", "mac", "osx", "darwin"]),
 ];
-const ARCH_WORDS: [(&str, &[&str]); 2] = [
+/// The 32-bit rows are never a game's arch: they only reject those builds.
+/// No bare `x86`: `x86_64` splits into the tokens `x86` and `64`.
+const ARCH_WORDS: [(&str, &[&str]); 4] = [
     ("x64", &["x86_64", "x64", "amd64"]),
     ("arm64", &["arm64", "aarch64"]),
+    ("x86", &["i386", "i586", "i686"]),
+    ("arm32", &["armhf", "armv7", "armel"]),
 ];
 /// Builds that don't run from a plain folder.
 const SKIPPED: [&str; 2] = ["flatpak", "snap"];
@@ -290,11 +294,6 @@ fn record(update: &mut Update, tag: &str, asset: Option<&Asset>) {
     update.build = asset.map(|a| a.build.clone()).unwrap_or_default();
 }
 
-/// The file of `release` to install for `game`.
-pub fn asset_for<'a>(game: &Game, release: &'a Release) -> Option<&'a Asset> {
-    pick_asset(release, &platform_of(game), &game.update.asset)
-}
-
 // ── Installing ───────────────────────────────────────────────────────────
 
 /// Stream `asset` into `dest`, counting bytes in `progress`.
@@ -308,7 +307,8 @@ fn download(asset: &Asset, dest: &Path, progress: &Progress) -> Result<(), Strin
         .set("User-Agent", &sgdb::user_agent())
         .call()
         .map_err(http_error)?;
-    let mut reader = response.into_reader();
+    // One byte past the size is enough to tell a wrong answer: never more.
+    let mut reader = response.into_reader().take(asset.size + 1);
     let mut file =
         BufWriter::new(File::create(dest).map_err(|e| format!("{}: {e}", dest.display()))?);
     let mut buf = vec![0u8; 1 << 16];
@@ -370,18 +370,13 @@ fn content_entries(dir: &Path) -> io::Result<Vec<fs::DirEntry>> {
         .collect())
 }
 
-/// The archive `extracted` holds when it holds nothing else: zips that wrap
-/// a `.tar.gz` so the exec bits survive.
-fn inner_archive(extracted: &Path) -> io::Result<Option<(Archive, PathBuf)>> {
+/// The file `extracted` holds when it holds nothing else.
+fn single_file(extracted: &Path) -> io::Result<Option<PathBuf>> {
     let entries = content_entries(extracted)?;
     let [single] = entries.as_slice() else {
         return Ok(None);
     };
-    if !single.file_type()?.is_file() {
-        return Ok(None);
-    }
-    let kind = archive_of(&single.file_name().to_string_lossy());
-    Ok(kind.map(|kind| (kind, single.path())))
+    Ok(single.file_type()?.is_file().then(|| single.path()))
 }
 
 /// An empty `dir`, whatever a crash left there.
@@ -391,16 +386,34 @@ fn fresh_dir(dir: &Path) -> Result<(), String> {
 }
 
 /// Unpack `archive` into `outer`, and the archive it wraps, if any, into
-/// `inner`. Returns the folder holding the files.
+/// `inner` (zips that wrap a `.tar.gz` so the exec bits survive). Returns
+/// the folder holding the files. Each archive is deleted once unpacked: an
+/// update needs its size on disk once, not three times.
 fn unpack(kind: Archive, archive: &Path, outer: &Path, inner: &Path) -> Result<PathBuf, String> {
     fresh_dir(outer)?;
     extract(kind, archive, outer)?;
-    let Some((inner_kind, wrapped)) = inner_archive(outer).map_err(|e| e.to_string())? else {
+    let _ = fs::remove_file(archive);
+    let wrapped = single_file(outer)
+        .map_err(|e| e.to_string())?
+        .and_then(|file| Some((archive_of(&file.file_name()?.to_string_lossy())?, file)));
+    let Some((inner_kind, file)) = wrapped else {
         return Ok(outer.to_path_buf());
     };
     fresh_dir(inner)?;
-    extract(inner_kind, &wrapped, inner)?;
+    extract(inner_kind, &file, inner)?;
+    let _ = fs::remove_file(&file);
     Ok(inner.to_path_buf())
+}
+
+/// The lone AppImage `root` holds, when the game's `target` is one too.
+/// Another target, like a launcher script, may run the AppImage by its
+/// name: then it is laid over the folder as it is.
+fn lone_appimage(root: &Path, target: &str) -> io::Result<Option<PathBuf>> {
+    if !is_appimage(target) {
+        return Ok(None);
+    }
+    let file = single_file(root)?;
+    Ok(file.filter(|f| is_appimage(&f.to_string_lossy())))
 }
 
 /// Where the archive's game files start: inside its single top folder
@@ -510,12 +523,15 @@ fn replace_program(file: &Path, game_dir: &Path, target: &str) -> Result<(), Str
         .map_err(|e| format!("{target}: {e}"))
 }
 
-/// Unpack `archive` and lay its files over the game. Returns how many
-/// files were written.
+/// Unpack `archive` and lay its files over the game, or put the AppImage it
+/// wraps in place of the executable `target` when that is an AppImage too
+/// (another target, like a launcher script, may run the AppImage by its
+/// name: it is laid over the folder as it is). Returns how many files were
+/// written.
 fn lay_archive(
     kind: Archive,
     archive: &Path,
-    game_dir: &Path,
+    (game_dir, target): (&Path, &str),
     (extracted, inner): (&Path, &Path),
     progress: &Progress,
 ) -> Result<usize, String> {
@@ -524,7 +540,10 @@ fn lay_archive(
         return Err("cancelled".into());
     }
     let root = content_root(&unpacked, game_dir).map_err(|e| e.to_string())?;
-    upsert(&root, game_dir)
+    match lone_appimage(&root, target).map_err(|e| e.to_string())? {
+        Some(file) => replace_program(&file, game_dir, target).map(|()| 1),
+        None => upsert(&root, game_dir),
+    }
 }
 
 /// Rewrite the game's game.json as on disk now, changed by `change`.
@@ -566,11 +585,18 @@ pub fn install(
     )));
     let extracted = games_dir.join(package::staging_name(&format!("{name}.update")));
     let inner = games_dir.join(package::staging_name(&format!("{name}.update-inner")));
+    let target = platform_of(game).target;
     let result = (|| {
         download(asset, &archive, progress)?;
         let files = match archive_of(&asset.name) {
-            Some(kind) => lay_archive(kind, &archive, &game.dir, (&extracted, &inner), progress)?,
-            None => replace_program(&archive, &game.dir, &platform_of(game).target).map(|()| 1)?,
+            Some(kind) => lay_archive(
+                kind,
+                &archive,
+                (&game.dir, &target),
+                (&extracted, &inner),
+                progress,
+            )?,
+            None => replace_program(&archive, &game.dir, &target).map(|()| 1)?,
         };
         log::info!("{}: {files} files from {} ({tag})", game.title, asset.name);
         // The size changed: the run after the update measures it again.
@@ -991,17 +1017,92 @@ mod tests {
     #[test]
     fn a_zip_wrapping_a_tar_gz_unpacks_both_and_keeps_exec_bits() {
         let dir = TempDir::new();
-        let mut zip = zip::ZipWriter::new(io::Cursor::new(Vec::new()));
-        zip.start_file("Game.tar.gz", zip::write::SimpleFileOptions::default())
-            .unwrap();
-        zip.write_all(&tar_gz(&[("Game", b"bin"), ("assets/a", b"a")]))
-            .unwrap();
-        let archive = dir.write("a.zip", &zip.finish().unwrap().into_inner());
+        let wrapped = tar_gz(&[("Game", b"bin"), ("assets/a", b"a")]);
+        let archive = dir.write("a.zip", &zip_of("Game.tar.gz", &wrapped));
         let (outer, inner) = (dir.path().join("outer"), dir.path().join("inner"));
         let unpacked = unpack(Archive::Zip, &archive, &outer, &inner).unwrap();
         assert_eq!(unpacked, inner);
         assert_eq!(fs::read(inner.join("assets/a")).unwrap(), b"a");
         assert!(platform::has_exec_permission(&inner.join("Game")));
+    }
+
+    #[test]
+    fn unpacked_archives_are_deleted_at_once() {
+        let dir = TempDir::new();
+        let archive = dir.write(
+            "a.zip",
+            &zip_of("Game.tar.gz", &tar_gz(&[("Game", b"bin")])),
+        );
+        let (outer, inner) = (dir.path().join("outer"), dir.path().join("inner"));
+        unpack(Archive::Zip, &archive, &outer, &inner).unwrap();
+        assert!(!archive.exists());
+        assert!(!outer.join("Game.tar.gz").exists());
+    }
+
+    fn zip_of(name: &str, data: &[u8]) -> Vec<u8> {
+        let mut zip = zip::ZipWriter::new(io::Cursor::new(Vec::new()));
+        zip.start_file(name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(data).unwrap();
+        zip.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn a_zipped_appimage_replaces_the_executable_even_in_a_folder() {
+        for zipped in ["SoH-v2.AppImage", "SoH-v2/SoH-v2.AppImage"] {
+            let dir = TempDir::new();
+            let game = installed_game(&dir);
+            dir.write("games/Banjo/soh.AppImage", b"old");
+            let archive = dir.write("a.zip", &zip_of(zipped, b"new appimage"));
+            let (outer, inner) = (dir.path().join("outer"), dir.path().join("inner"));
+            let written = lay_archive(
+                Archive::Zip,
+                &archive,
+                (&game.dir, "soh.AppImage"),
+                (&outer, &inner),
+                &Progress::default(),
+            )
+            .unwrap();
+            assert_eq!(written, 1, "{zipped}");
+            assert_eq!(
+                fs::read(game.dir.join("soh.AppImage")).unwrap(),
+                b"new appimage",
+                "{zipped}"
+            );
+            assert!(!game.dir.join("SoH-v2.AppImage").exists(), "{zipped}");
+        }
+    }
+
+    #[test]
+    fn a_zipped_appimage_is_laid_as_a_file_when_the_target_is_no_appimage() {
+        let dir = TempDir::new();
+        let game = installed_game(&dir);
+        dir.write("games/Banjo/run.sh", b"./Game.AppImage");
+        let archive = dir.write("a.zip", &zip_of("Game.AppImage", b"new appimage"));
+        let (outer, inner) = (dir.path().join("outer"), dir.path().join("inner"));
+        lay_archive(
+            Archive::Zip,
+            &archive,
+            (&game.dir, "run.sh"),
+            (&outer, &inner),
+            &Progress::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(game.dir.join("run.sh")).unwrap(),
+            b"./Game.AppImage"
+        );
+        assert_eq!(
+            fs::read(game.dir.join("Game.AppImage")).unwrap(),
+            b"new appimage"
+        );
+    }
+
+    #[test]
+    fn a_32_bit_build_is_not_an_x64_build() {
+        let release = release(&["pd-i686-linux.tar.gz", "pd-armhf-linux.tar.gz"]);
+        assert_eq!(picked(&release, "linux", "x64", ""), None);
+        assert_eq!(picked(&release, "linux", "arm64", ""), None);
     }
 
     #[test]
