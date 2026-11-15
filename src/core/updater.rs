@@ -875,14 +875,17 @@ mod tests {
             arch: arch.into(),
             ..Default::default()
         };
+        // An OS other than this machine's, whichever it is.
+        let foreign = if platform::os_tag() == "windows" {
+            "linux"
+        } else {
+            "windows"
+        };
         let mut game = Game::skeleton(Path::new("/g/G"));
-        game.targets = vec![target("windows", "x64")];
+        game.targets = vec![target(foreign, "x64")];
         let os_arch = |p: Platform| (p.os, p.arch);
-        assert_eq!(
-            os_arch(platform_of(&game)),
-            ("windows".into(), "x64".into())
-        );
-        game.targets = vec![target("windows", "any")];
+        assert_eq!(os_arch(platform_of(&game)), (foreign.into(), "x64".into()));
+        game.targets = vec![target(foreign, "any")];
         assert_eq!(platform_of(&game).arch, platform::arch_tag());
         game.targets.push(target(platform::os_tag(), "arm64"));
         assert_eq!(
