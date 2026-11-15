@@ -28,6 +28,7 @@ run_args=(
     --security-opt label=disable
     -e CARGO_HOME=/src/target/cargo-home
     -e STEAMGRIDDB_API_KEY
+    -e CARTRIDGE_REPO
 )
 # Rootless podman maps container root to you; docker needs your uid explicitly.
 [[ "$(basename "$ENGINE")" == docker ]] && run_args+=(--user "$(id -u):$(id -g)")
