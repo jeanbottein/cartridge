@@ -4,6 +4,7 @@
 #   Cartridge/
 #     <app>           Cartridge.AppImage, Cartridge.app or cartridge.exe
 #     README.txt      what this folder is, first launch per system, updating
+#     LICENSE.txt     the app's license and its embedded fonts'
 #     system/         workspace; config.txt is created on first launch, so
 #                     extracting a newer release over it keeps the settings
 #     games/ mods/ saves-copies/ saves-links/   (each with a README.txt)
@@ -28,6 +29,12 @@ STAGE="$WORK/Cartridge"
 
 cp -R "$REPO_ROOT/packaging/cartridge" "$STAGE"
 cp -R "$APP" "$STAGE/$APP_NAME"
+# The app's license, then those of the fonts embedded in it (the OFL asks
+# for its text to travel with the software).
+for license in LICENSE assets/VT323-OFL.txt assets/Barlow-OFL.txt; do
+    cat "$REPO_ROOT/$license"
+    printf '\n\n'
+done > "$STAGE/LICENSE.txt"
 
 mkdir -p dist
 OUT_DIR="$(cd dist && pwd)"

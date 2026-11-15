@@ -6,7 +6,8 @@
 //! A release ships ready cartridges (`Cartridge/<app>` plus READMEs, see
 //! package.sh): only the app is taken from the archive and put in place of
 //! the running one, which is moved aside first and removed at the next
-//! launch. The archive's CRCs (gzip, zip) catch a damaged download.
+//! launch. The download is checked against the sha256 GitHub publishes for
+//! it (see `updater::download`).
 
 use std::fs;
 use std::path::{Path, PathBuf};

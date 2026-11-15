@@ -156,5 +156,9 @@ Set `STEAMGRIDDB_API_KEY` at build time (also passed through by `container.sh`) 
 ## Credits
 
 - **Icon**: <a href="https://www.flaticon.com/free-icons/game-cartridge" title="game cartridge icons">Game cartridge icons created by Freepik - Flaticon</a>
-- **Font**: VT323 by The VT323 Project Authors — SIL Open Font License 1.1 (`assets/VT323-OFL.txt`).
+- **Fonts**: VT323 by The VT323 Project Authors and Barlow by The Barlow Project Authors — SIL Open Font License 1.1 (`assets/VT323-OFL.txt`, `assets/Barlow-OFL.txt`).
 - **Rust crates**: [macroquad](https://github.com/not-fl3/macroquad) (UI), [gilrs](https://gitlab.com/gilrs-project/gilrs) (gamepads), [ureq](https://github.com/algesten/ureq) (HTTP), [image](https://github.com/image-rs/image), [serde_json](https://github.com/serde-rs/json), [crc32fast](https://github.com/srijs/rust-crc32fast), [log](https://github.com/rust-lang/log).
+
+## License
+
+MIT, see [LICENSE](LICENSE).

@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use super::app::GAME_DATA_DIR;
 use super::models::{Game, Update, NEWER_APP};
@@ -296,7 +297,25 @@ fn record(update: &mut Update, tag: &str, asset: Option<&Asset>) {
 
 // ── Installing ───────────────────────────────────────────────────────────
 
-/// Stream `asset` into `dest`, counting bytes in `progress`.
+/// Lowercase hex of `bytes`.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The download matches the sha256 GitHub computed at upload (`build` is
+/// `sha256:…`); files without one (uploaded before 2025) are taken as is.
+fn check_digest(asset: &Asset, sha256: &str) -> Result<(), String> {
+    match asset.build.strip_prefix("sha256:") {
+        Some(expected) if !expected.eq_ignore_ascii_case(sha256) => Err(format!(
+            "{}: the download is damaged (checksum differs), try again",
+            asset.name
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Stream `asset` into `dest`, counting bytes in `progress`, and check it
+/// against its published checksum.
 pub(super) fn download(asset: &Asset, dest: &Path, progress: &Progress) -> Result<(), String> {
     progress.start(asset.size);
     let response = ureq::AgentBuilder::new()
@@ -313,6 +332,7 @@ pub(super) fn download(asset: &Asset, dest: &Path, progress: &Progress) -> Resul
         BufWriter::new(File::create(dest).map_err(|e| format!("{}: {e}", dest.display()))?);
     let mut buf = vec![0u8; 1 << 16];
     let mut written = 0u64;
+    let mut hasher = Sha256::new();
     // A loop: each chunk checks for a cancel and reports progress.
     loop {
         if progress.is_cancelled() {
@@ -323,6 +343,7 @@ pub(super) fn download(asset: &Asset, dest: &Path, progress: &Progress) -> Resul
             break;
         }
         file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+        hasher.update(&buf[..n]);
         written += n as u64;
         progress.advance(n as u64);
     }
@@ -333,7 +354,7 @@ pub(super) fn download(asset: &Asset, dest: &Path, progress: &Progress) -> Resul
             asset.name, asset.size
         ));
     }
-    Ok(())
+    check_digest(asset, &hex(&hasher.finalize()))
 }
 
 /// Unpack `archive` into the empty folder `dest`. Both readers refuse
@@ -665,6 +686,37 @@ mod tests {
 
     fn picked_for(release: &Release, target: &str) -> Option<String> {
         pick_asset(release, &platform("linux", "x64", target), "").map(|a| a.name.clone())
+    }
+
+    fn published(build: &str) -> Asset {
+        Asset {
+            build: build.into(),
+            ..asset("Game.tar.gz")
+        }
+    }
+
+    #[test]
+    fn sha256_is_lowercase_hex() {
+        assert_eq!(
+            hex(&Sha256::digest(b"abc")),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn a_download_matching_its_digest_is_accepted() {
+        assert!(check_digest(&published("sha256:AB12"), "ab12").is_ok());
+    }
+
+    #[test]
+    fn a_download_differing_from_its_digest_is_refused() {
+        assert!(check_digest(&published("sha256:ab12"), "cd34").is_err());
+    }
+
+    #[test]
+    fn a_file_without_digest_is_not_checked() {
+        assert!(check_digest(&published("2024-01-01T00:00:00Z"), "cd34").is_ok());
+        assert!(check_digest(&published(""), "cd34").is_ok());
     }
 
     #[test]
