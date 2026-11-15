@@ -16,8 +16,13 @@ use super::package::{self, Progress};
 use super::updater::{self, Asset, Platform, Release};
 use super::{paths, platform};
 
-/// This build's version, compared with release tags.
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// This build's version, compared with release tags. Release builds take it
+/// from their tag (`CARTRIDGE_VERSION`, set by release.yml), so Cargo.toml's
+/// version is only what local builds report.
+pub const VERSION: &str = match option_env!("CARTRIDGE_VERSION") {
+    Some(version) if !version.is_empty() => version,
+    _ => env!("CARGO_PKG_VERSION"),
+};
 
 /// `owner/name` of the GitHub project this build updates from.
 pub fn repo() -> Option<&'static str> {

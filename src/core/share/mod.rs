@@ -84,7 +84,7 @@ impl ServerInfo {
         ServerInfo {
             name,
             port,
-            version: env!("CARGO_PKG_VERSION").into(),
+            version: super::self_update::VERSION.into(),
             protocol: PROTOCOL,
         }
     }
