@@ -70,7 +70,10 @@ fn search(cfg: &Config) -> Receiver<Found> {
         let found = client::find_peers(&cfg)
             .into_iter()
             .map(|peer| {
-                let games = client::list(peer.addr);
+                let games = match peer.info.mismatch() {
+                    Some(why) => Err(why),
+                    None => client::list(peer.addr),
+                };
                 (peer, games)
             })
             .collect();
@@ -113,9 +116,14 @@ impl Network {
 
     fn show(&mut self, found: Found, games_dir: Option<&Path>) {
         let focused = self.rows.get(self.list.cursor).map(|r| r.game.id.clone());
+        // A protocol mismatch says which side to update; other errors are
+        // too long for a toast: the name says enough.
         let failed: Vec<String> = found
             .iter()
-            .filter_map(|(peer, games)| games.as_ref().err().map(|_| peer.info.name.clone()))
+            .filter_map(|(peer, games)| {
+                games.as_ref().err()?;
+                Some(peer.info.mismatch().unwrap_or_else(|| peer.info.name.clone()))
+            })
             .collect();
         self.peers = found.iter().map(|(peer, _)| peer.clone()).collect();
         let mut rows: Vec<Row> = found

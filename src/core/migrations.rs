@@ -10,7 +10,7 @@ use log::{error, info, warn};
 use serde_json::{json, Map, Value};
 
 use super::app::GAME_DATA_DIR;
-use super::models::{folder_name_of, to_pretty_json, GAME_JSON};
+use super::models::{folder_name_of, schema_of, to_pretty_json, GAME_JSON, SCHEMA_VERSION};
 use super::paths;
 
 const OLD_MANIFEST: &str = "launch_manifest.json";
@@ -35,6 +35,11 @@ fn write_json(path: &Path, value: &Value) -> bool {
         .is_ok()
 }
 
+/// A newer app's file: its migrations are its own business.
+fn is_from_newer_app(data: &Map<String, Value>) -> bool {
+    data.get("schema_version").map_or(0, schema_of) > SCHEMA_VERSION
+}
+
 /// Rewrite one game's `game.json` with `change`; `change` returns false to skip.
 fn rewrite_game_json(game_dir: &Path, change: impl Fn(&mut Map<String, Value>) -> bool) -> bool {
     let path = game_json_of(game_dir);
@@ -44,7 +49,7 @@ fn rewrite_game_json(game_dir: &Path, change: impl Fn(&mut Map<String, Value>) -
     let Some(Value::Object(mut data)) = read_json(&path) else {
         return false;
     };
-    if !change(&mut data) {
+    if is_from_newer_app(&data) || !change(&mut data) {
         return false;
     }
     let written = write_json(&path, &Value::Object(data));
@@ -305,5 +310,15 @@ mod tests {
         let text = std::fs::read_to_string(dir.path().join("Game/.cartridge/game.json")).unwrap();
         assert!(text.find("\"title\"").unwrap() < text.find("\"targets\"").unwrap());
         assert!(text.contains("\"arch\": \"x64\""));
+    }
+
+    #[test]
+    fn a_newer_apps_game_json_is_left_alone() {
+        let dir = TempDir::new();
+        let body = br#"{"schema_version": 99, "targets": [{"arch": "x86_64", "target": "a"}]}"#;
+        dir.write("Game/.cartridge/game.json", body);
+        assert_eq!(migrate_each_game(dir.path(), rename_x86_64), 0);
+        let text = std::fs::read(dir.path().join("Game/.cartridge/game.json")).unwrap();
+        assert_eq!(text, body);
     }
 }

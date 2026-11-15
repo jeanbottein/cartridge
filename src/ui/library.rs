@@ -18,7 +18,7 @@ use super::launcher::{self, Session};
 use super::style::{self, Toast};
 use super::{draw_spinner, Hint, Ui};
 use crate::core::config::Config;
-use crate::core::models::{Game, Install};
+use crate::core::models::{Game, Install, NEWER_APP};
 use crate::core::pipeline::Phase;
 use crate::core::proton::Downloads;
 use crate::core::scanner;
@@ -283,6 +283,10 @@ impl Library {
         if ui.action(Action::Edit) {
             return match (busy, installed) {
                 (true, _) => Some(Event::Cancel(id)),
+                (false, true) if game.is_from_newer_app() => {
+                    self.toast.show(NEWER_APP, theme::secondary());
+                    None
+                }
                 (false, true) => Some(Event::Edit(self.cursor)),
                 (false, false) => {
                     self.toast

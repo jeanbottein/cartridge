@@ -5,12 +5,15 @@ pub mod client;
 pub mod discovery;
 pub mod server;
 
+use std::cmp::Ordering;
+
 use serde::{Deserialize, Serialize};
 
 use super::config::Config;
 use super::models::{Game, ImageSlot, Target};
 
-/// Bumped on incompatible API changes; peers with another version are ignored.
+/// Bumped on incompatible API changes; peers with another one are shown,
+/// with which side to update, but not listed.
 /// 2: renamed to •cartridge (the discovery query changed too).
 pub const PROTOCOL: u32 = 2;
 pub const DEFAULT_PORT: u16 = 47800;
@@ -85,6 +88,16 @@ impl ServerInfo {
             protocol: PROTOCOL,
         }
     }
+
+    /// Why this machine and the server can't share, if they can't.
+    pub fn mismatch(&self) -> Option<String> {
+        let which = match self.protocol.cmp(&PROTOCOL) {
+            Ordering::Equal => return None,
+            Ordering::Greater => "a newer •cartridge: update this one",
+            Ordering::Less => "an older •cartridge: update it",
+        };
+        Some(format!("{} runs {which}", self.name))
+    }
 }
 
 /// Percent-encode a URL path segment.
@@ -121,6 +134,16 @@ pub fn decode_segment(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_server_of_another_protocol_says_which_side_to_update() {
+        let mut info = ServerInfo::new("deck".into(), 1);
+        assert_eq!(info.mismatch(), None);
+        info.protocol = PROTOCOL + 1;
+        assert!(info.mismatch().unwrap().contains("update this one"));
+        info.protocol = PROTOCOL - 1;
+        assert!(info.mismatch().unwrap().contains("update it"));
+    }
 
     #[test]
     fn segments_round_trip() {

@@ -97,12 +97,12 @@ pub struct UpdatesScreen {
     pub toast: Toast,
 }
 
-/// The installed games with a release page, in library order (packaged-only
-/// games are read-only).
+/// The games with a release page this app may write, in library order
+/// (packaged-only games and those of a newer •cartridge are read-only).
 fn sources(games: &[Game]) -> Vec<&Game> {
     games
         .iter()
-        .filter(|g| g.has_update_url() && g.is_installed())
+        .filter(|g| g.has_update_url() && g.is_writable())
         .collect()
 }
 

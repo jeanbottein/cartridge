@@ -181,7 +181,7 @@ impl<'a> Pipeline<'a> {
             Phase::Persist => {
                 let dirty = games
                     .iter()
-                    .filter(|g| g.needs_persist && g.is_installed())
+                    .filter(|g| g.needs_persist && g.is_writable())
                     .count();
                 summary.games_written += dirty;
                 summary.games_changed |= dirty > 0;

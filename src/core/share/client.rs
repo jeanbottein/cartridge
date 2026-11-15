@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::discovery::{self, Peer};
-use super::{encode_segment, port, RemoteGame, ServerInfo, PROTOCOL};
+use super::{encode_segment, port, RemoteGame, ServerInfo};
 use crate::core::config::Config;
 use crate::core::package::{self, Progress};
 
@@ -58,7 +58,8 @@ fn game_url(addr: SocketAddr, id: &str, what: &str) -> String {
     api(addr, &format!("games/{}/{what}", encode_segment(id)))
 }
 
-/// The server at `host[:port]`, if one answers with our protocol.
+/// The server at `host[:port]`, if one answers (of any protocol: see
+/// [`ServerInfo::mismatch`]).
 pub fn probe(host: &str, default_port: u16) -> Option<Peer> {
     let with_port = if host.contains(':') {
         host.to_string()
@@ -67,7 +68,7 @@ pub fn probe(host: &str, default_port: u16) -> Option<Peer> {
     };
     let addr = with_port.to_socket_addrs().ok()?.next()?;
     let info: ServerInfo = get_json(&api(addr, "info")).ok()?;
-    (info.protocol == PROTOCOL).then_some(Peer { info, addr })
+    Some(Peer { info, addr })
 }
 
 /// `SHARE_PEERS` (`host[:port], ...`) for networks where broadcast doesn't reach.

@@ -9,7 +9,11 @@ use serde_json::Value;
 use super::app::GAME_DATA_DIR;
 
 pub const GAME_JSON: &str = "game.json";
+/// Bump on any change to what game.json holds: an older app then leaves
+/// the file alone instead of rewriting it without what it doesn't know.
 pub const SCHEMA_VERSION: u32 = 2;
+/// Why a game of a newer schema can't be changed here.
+pub const NEWER_APP: &str = "Made by a newer •cartridge: update this one to change it.";
 
 /// `null` reads as an empty string (hand-edited files).
 fn nullable<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
@@ -321,6 +325,8 @@ pub struct Game {
     pub size: Option<u64>,
     pub update: Update,
     pub install: Install,
+    /// `schema_version` of the `game.json` read (0 without one).
+    pub schema_version: u32,
     /// `.cartridge/game.json` exists on disk.
     pub has_cartridge: bool,
     /// In-memory data differs from disk.
@@ -371,6 +377,7 @@ fn no_update(update: &&Update) -> bool {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct GameFileIn {
+    schema_version: Value,
     title: Value,
     targets: Value,
     proton: Value,
@@ -438,6 +445,7 @@ impl Game {
             description: scalar_text(file.description),
             size: as_id(&file.size).and_then(|s| u64::try_from(s).ok()),
             update: serde_json::from_value(file.update).unwrap_or_default(),
+            schema_version: schema_of(&file.schema_version),
             has_cartridge: true,
             ..Default::default()
         })
@@ -472,6 +480,17 @@ impl Game {
         !matches!(self.install, Install::Packaged { .. })
     }
 
+    /// Its game.json comes from a newer •cartridge: read as far as this one
+    /// understands it, never written back (that would drop what it doesn't).
+    pub fn is_from_newer_app(&self) -> bool {
+        self.schema_version > SCHEMA_VERSION
+    }
+
+    /// What may write its game.json: installed, and of a schema this app knows.
+    pub fn is_writable(&self) -> bool {
+        self.is_installed() && !self.is_from_newer_app()
+    }
+
     pub fn package(&self) -> Option<&Path> {
         match &self.install {
             Install::Installed => None,
@@ -491,6 +510,13 @@ fn entries<T: serde::de::DeserializeOwned>(list: Value) -> Vec<T> {
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// A `schema_version` value (0 when missing or not a number).
+pub fn schema_of(value: &Value) -> u32 {
+    value
+        .as_u64()
+        .map_or(0, |v| u32::try_from(v).unwrap_or(u32::MAX))
 }
 
 fn as_id(value: &Value) -> Option<i64> {
@@ -553,6 +579,24 @@ mod tests {
         assert_eq!(game.targets[0].start_in, ".");
         assert_eq!(game.steamgriddb_id, Some(1234));
         assert_eq!(game.to_json(), SAMPLE);
+    }
+
+    #[test]
+    fn a_game_of_a_newer_schema_is_read_but_not_writable() {
+        let game = Game::from_json(
+            Path::new("/g/Celeste"),
+            r#"{"schema_version": 3, "title": "Celeste", "future": {"x": 1}}"#,
+        )
+        .unwrap();
+        assert_eq!(game.title, "Celeste");
+        assert!(game.is_from_newer_app() && !game.is_writable());
+    }
+
+    #[test]
+    fn a_game_of_this_schema_or_without_one_is_writable() {
+        let current = Game::from_json(Path::new("/g/A"), SAMPLE).unwrap();
+        let unversioned = Game::from_json(Path::new("/g/B"), "{}").unwrap();
+        assert!(current.is_writable() && unversioned.is_writable());
     }
 
     #[test]

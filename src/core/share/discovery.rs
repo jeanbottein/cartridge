@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use log::warn;
 
 use super::server::Shared;
-use super::{ServerInfo, PROTOCOL};
+use super::ServerInfo;
 
 const QUERY: &[u8] = b"CARTRIDGE?";
 
@@ -46,7 +46,7 @@ pub fn discover(port: u16, wait: Duration) -> Vec<Peer> {
 
 fn parse_reply(bytes: &[u8], from: SocketAddr) -> Option<Peer> {
     let info: ServerInfo = serde_json::from_slice(bytes).ok()?;
-    (info.protocol == PROTOCOL).then(|| Peer {
+    Some(Peer {
         addr: SocketAddr::new(from.ip(), info.port),
         info,
     })
@@ -107,12 +107,12 @@ mod tests {
     }
 
     #[test]
-    fn ignores_other_protocols_and_junk() {
+    fn keeps_servers_of_other_protocols_and_ignores_junk() {
         let from = SocketAddr::from((Ipv4Addr::LOCALHOST, 1));
         let mut info = ServerInfo::new("x".into(), 9);
-        assert!(parse_reply(&serde_json::to_vec(&info).unwrap(), from).is_some());
-        info.protocol = PROTOCOL + 1;
-        assert!(parse_reply(&serde_json::to_vec(&info).unwrap(), from).is_none());
+        info.protocol += 1;
+        let peer = parse_reply(&serde_json::to_vec(&info).unwrap(), from).unwrap();
+        assert_eq!(peer.info.protocol, info.protocol);
         assert!(parse_reply(b"junk", from).is_none());
     }
 }

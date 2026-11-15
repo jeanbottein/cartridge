@@ -14,7 +14,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use super::app::GAME_DATA_DIR;
-use super::models::{Game, Update};
+use super::models::{Game, Update, NEWER_APP};
 use super::package::{self, Kind, Progress};
 use super::{paths, platform, sgdb};
 
@@ -551,6 +551,9 @@ fn rewrite_game_json(game: &Game, change: impl FnOnce(&mut Game)) -> Result<(), 
     let path = game.game_json_path();
     let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut fresh = Game::from_json(&game.dir, &text).map_err(|e| e.to_string())?;
+    if fresh.is_from_newer_app() {
+        return Err(NEWER_APP.into());
+    }
     change(&mut fresh);
     paths::write_atomic(&path, fresh.to_json()).map_err(|e| format!("{}: {e}", path.display()))
 }
@@ -573,6 +576,9 @@ pub fn install(
 ) -> Result<PathBuf, String> {
     if !game.is_installed() {
         return Err("Unpack the game before updating it".into());
+    }
+    if game.is_from_newer_app() {
+        return Err(NEWER_APP.into());
     }
     let games_dir = game
         .dir

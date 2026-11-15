@@ -67,7 +67,7 @@ pub fn persist(games: &mut [Game]) {
     // `Foo/` folder that looks like a second, installed copy.
     let dirty: Vec<&mut Game> = games
         .iter_mut()
-        .filter(|g| g.needs_persist && g.is_installed())
+        .filter(|g| g.needs_persist && g.is_writable())
         .collect();
     if dirty.is_empty() {
         return;
@@ -88,6 +88,7 @@ pub fn persist(games: &mut [Game]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::models::SCHEMA_VERSION;
     use crate::core::testutil::TempDir;
 
     #[test]
@@ -102,5 +103,16 @@ mod tests {
         assert!(!games[0].game_json_path().exists());
         assert!(games[1].game_json_path().is_file());
         assert!(!games[1].needs_persist && games[1].has_cartridge);
+    }
+
+    #[test]
+    fn never_rewrites_a_newer_apps_game() {
+        let dir = TempDir::new();
+        let mut game = Game::skeleton(&dir.mkdir("Newer"));
+        game.schema_version = SCHEMA_VERSION + 1;
+        game.needs_persist = true;
+        let mut games = vec![game];
+        persist(&mut games);
+        assert!(!games[0].game_json_path().exists());
     }
 }

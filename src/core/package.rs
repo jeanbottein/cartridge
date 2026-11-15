@@ -25,6 +25,8 @@ use super::models::{to_pretty_json, Game, GAME_JSON};
 use super::paths;
 
 pub const EXTENSION: &str = ".cartridge.tar";
+/// Bump when an older app can't unpack the tar layout; game.json changes
+/// bump `models::SCHEMA_VERSION` instead.
 const FORMAT: u32 = 1;
 const PACKAGE_JSON: &str = "package.json";
 const CHECKSUMS_JSON: &str = "checksums.json";
@@ -431,7 +433,10 @@ fn read_manifest<R: Read>(entries: &mut Entries<'_, R>) -> Result<Manifest, Stri
     }
     let manifest: Manifest = serde_json::from_reader(&mut entry).map_err(|e| e.to_string())?;
     if manifest.format > FORMAT {
-        return Err(format!("Package format {} is too new", manifest.format));
+        return Err(format!(
+            "Package made by a newer •cartridge (format {}): update this one",
+            manifest.format
+        ));
     }
     let expected = Path::new(&manifest.folder_name)
         .join(GAME_DATA_DIR)
@@ -664,6 +669,9 @@ fn finish(staging: &Path, dest: &Path, manifest: &Manifest, game_bytes: u64) -> 
     let Ok(mut game) = Game::from_json(dest, &text) else {
         return Ok(());
     };
+    if game.is_from_newer_app() {
+        return Ok(());
+    }
     game.size = Some(game_bytes);
     paths::write_atomic(game_json, game.to_json())
 }
@@ -760,6 +768,19 @@ mod tests {
         let text = fs::read_to_string(dest.join(GAME_DATA_DIR).join(GAME_JSON)).unwrap();
         assert_eq!(Game::from_json(&dest, &text).unwrap().size, Some(3006));
         assert!(!dest.join(GAME_DATA_DIR).join(CHECKSUMS_JSON).exists());
+    }
+
+    #[test]
+    fn unpacking_keeps_a_newer_apps_game_json_as_it_is() {
+        let dir = TempDir::new();
+        let body = br#"{"schema_version": 99, "title": "Celeste", "future": true}"#;
+        sample_game(&dir);
+        dir.write(&format!("games/Celeste/{GAME_DATA_DIR}/{GAME_JSON}"), body);
+        let game = crate::core::scanner::load_library(&dir.path().join("games")).remove(0);
+        let package = dir.path().join(format!("Celeste{EXTENSION}"));
+        pack(&game, &package, &Progress::default()).unwrap();
+        let dest = unpack(&package, &dir.mkdir("target"), &Progress::default()).unwrap();
+        assert_eq!(fs::read(dest.join(GAME_DATA_DIR).join(GAME_JSON)).unwrap(), body);
     }
 
     #[test]

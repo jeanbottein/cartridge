@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use log::{error, info};
+use log::{error, info, warn};
 
 use crate::core::app::{exe_dir, find_system_dir};
 use crate::core::autopilot::Autopilot;
@@ -149,6 +149,10 @@ pub fn peers(config: &Config) -> ExitCode {
             "{} at {} (v{})",
             peer.info.name, peer.addr, peer.info.version
         );
+        if let Some(why) = peer.info.mismatch() {
+            warn!("  {why}");
+            continue;
+        }
         match client::list(peer.addr) {
             Ok(games) => games.iter().for_each(|g| {
                 let size = g.size.map(sizer::human).unwrap_or_default();
@@ -182,6 +186,10 @@ pub fn copy(config: &Config, games_dir: &Path, peer: &str, game: &str, how: Copy
         error!("No •cartridge server named or reachable at {peer}");
         return ExitCode::FAILURE;
     };
+    if let Some(why) = peer.info.mismatch() {
+        error!("{why}");
+        return ExitCode::FAILURE;
+    }
     info!("Copying {game} from {} ({})", peer.info.name, peer.addr);
     let result = with_progress(|p| match how {
         Copy::Download => client::download(peer.addr, game, games_dir, p),

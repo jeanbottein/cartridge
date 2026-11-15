@@ -299,7 +299,7 @@ pub fn detect(games: &mut [Game]) {
 fn remember_appids(games: &mut [Game]) {
     for game in games
         .iter_mut()
-        .filter(|g| g.is_installed() && g.steam_appid.is_none())
+        .filter(|g| g.is_writable() && g.steam_appid.is_none())
     {
         if let Some(appid) = steam::appid_of(game) {
             game.steam_appid = Some(appid);
@@ -328,7 +328,7 @@ pub fn restore_exec_bit(exe: &Path) {
 fn detect_missing_targets(games: &mut [Game]) {
     let incomplete: Vec<&mut Game> = games
         .iter_mut()
-        .filter(|g| g.is_installed() && g.targets.is_empty())
+        .filter(|g| g.is_writable() && g.targets.is_empty())
         .collect();
     if incomplete.is_empty() {
         return;

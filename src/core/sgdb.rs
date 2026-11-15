@@ -405,7 +405,7 @@ fn apply(game: &mut Game, info: SgdbInfo) {
 /// yet. What it answered is cached, so asking again about a game it knows
 /// nothing more of costs no request.
 fn wants_enrichment(game: &Game) -> bool {
-    game.is_installed()
+    game.is_writable()
         && (game.steamgriddb_id.is_none() || game.images.cover.is_none() || game.year.is_none())
 }
 

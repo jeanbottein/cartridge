@@ -39,7 +39,7 @@ pub fn measure(games: &mut [Game]) {
     let mut measured = 0;
     for game in games
         .iter_mut()
-        .filter(|g| g.is_installed() && g.size.is_none())
+        .filter(|g| g.is_writable() && g.size.is_none())
     {
         match measure_game(&game.dir) {
             Ok(size) => {
