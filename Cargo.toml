@@ -1,6 +1,6 @@
 [package]
 name = "cartridge"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Manage DRM-free games on Linux / Steam Deck: detect, enrich, sync to Steam, patch, back up saves"
 license = "MIT"
