@@ -48,6 +48,7 @@ src/
     save_links.rs        # saves-links/ symlink tree (not built for now)
     proton.rs            # Windows games with Steam's Proton + runtime, in the shortcut's compatdata prefix; winetricks
     patcher.rs mods.rs   # mod file engine (state/apply/restore) + mod model (list, on/off)
+    self_update.rs       # the app's own update: release of CARTRIDGE_REPO (baked in by CI), only the app swapped (old one moved aside, removed at next launch)
     updater.rs           # game.json "update": latest GitHub release, asset pick by os/arch, download + upsert over the game folder (never deletes, never writes .cartridge/) or AppImage over the executable
     pipeline.rs init.rs logging.rs
     autopilot.rs         # Worker + Watcher: lists games/ every 2 s (served from the kernel cache), waits for new entries to stop changing
@@ -58,6 +59,7 @@ src/
     network.rs jobs.rs info.rs   # Network tab, background transfers, shared info panel
     mods.rs              # MODS tab: mods with status, A turns one on/off
     saves.rs             # SAVES tab: device and backup cards of the focused game, A back up / X restore (confirmed)
+    app_update.rs        # Settings > APP row: check (on demand, 5 min cooldown), confirm, install in the background, "restart to finish"
     updates.rs           # UPDATES tab: games with a release page; X checks GitHub (only on demand, 5 min cooldown), A updates (confirmed), Y marks installed
     style.rs             # Shared look: backdrop, cards, highlight, panels, bars, toasts, chips, badges
     covers.rs launcher.rs music.rs
@@ -83,6 +85,8 @@ Packages: a plain tar of `Foo/` with `.cartridge/package.json` first and `.cartr
 
 ## Key Conventions
 
+- **Versions, newer vs older apps:** bump `models::SCHEMA_VERSION` on any change to what game.json holds: an older app reads a newer game.json but never writes it (`Game::is_writable`; migrations skip it too), since it would drop what it doesn't know. Package `FORMAT` only for the tar layout, share `PROTOCOL` only for the HTTP API; peers of another protocol are listed by name with which side to update.
+- **Self-update:** `CARTRIDGE_REPO` (`owner/name`) is baked in at build time (`option_env!`, set to `github.repository` in release.yml, passed by container.sh); without it there's no APP section. Tags must be Cargo.toml's version (`v` + version, checked in CI). The app is found in the release archive by its `app_name` (`Cartridge.AppImage` / `Cartridge.app` / `cartridge.exe`).
 - **Compatibility is the contract:** game.json (4-space JSON), shortcuts.vdf, AppIDs (`crc32(exe+title) | 0x80000000`, computed once and kept in game.json `steam_appid` so a rename keeps the shortcut, Proton prefix and saves: always go through `steam::appid_for`/`appid_of`), path normalization must stay byte-compatible with existing cartridges. Save backups are `saves-copies/<game folder>/<save folder>/` (folder names survive a rename). Golden tests in `testdata/` guard this.
 - **Fixed layout, no path settings:** `games/`, `mods/`, `saves-copies/`, `saves-links/` sit next to `system/` (`core::app::FOLDERS`, `Config::games_dir()`/`mods_dir()`/...). Users who want a folder elsewhere replace it with a symlink.
 - **`Config`** holds the values as typed in `config.txt` (no value is a path).

@@ -33,10 +33,17 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Mode::Version => {
-            println!("{} {}", core::app::APP_NAME, env!("CARGO_PKG_VERSION"));
+            let source = core::self_update::repo()
+                .map(|repo| format!(" (updates from {repo})"))
+                .unwrap_or_default();
+            let version = core::self_update::VERSION;
+            println!("{} {version}{source}", core::app::APP_NAME);
             ExitCode::SUCCESS
         }
         Mode::Ui if core::app::has_display() => {
+            if let Ok(app) = core::self_update::target() {
+                core::self_update::remove_previous(&app);
+            }
             ui::run(dir);
             ExitCode::SUCCESS
         }

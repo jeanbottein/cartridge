@@ -24,6 +24,7 @@ pub mod proton;
 pub mod save_links;
 pub mod saver;
 pub mod scanner;
+pub mod self_update;
 pub mod sgdb;
 pub mod share;
 pub mod sizer;

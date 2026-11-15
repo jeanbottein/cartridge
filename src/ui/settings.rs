@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 
 use macroquad::prelude::*;
 
+use super::app_update::{self, AppUpdate};
 use super::engine::theme::{self, Tone, THEMES};
 use super::form::{Event as FormEvent, Field, Form};
 use super::{Hint, Ui};
@@ -141,23 +142,54 @@ fn fields(cfg: &Config) -> Vec<Field> {
 pub struct Settings {
     form: Form,
     message: Option<(String, Tone)>,
+    /// The APP section, for builds that name a project to update from.
+    app_update: Option<AppUpdate>,
+}
+
+/// The config fields, then the APP section when there is one.
+fn all_fields(cfg: &Config, app_update: Option<&AppUpdate>) -> Vec<Field> {
+    let app = app_update.map(|update| [Field::section("APP"), update.field()]);
+    fields(cfg)
+        .into_iter()
+        .chain(app.into_iter().flatten())
+        .collect()
 }
 
 impl Settings {
     pub fn new(cfg: &Config) -> Settings {
+        let app_update = AppUpdate::new();
         Settings {
-            form: Form::new(fields(cfg)),
+            form: Form::new(all_fields(cfg, app_update.as_ref())),
             message: None,
+            app_update,
         }
     }
 
     /// Rebuild from a reloaded config, keeping the cursor.
     pub fn refresh(&mut self, cfg: &Config) {
-        self.form.set_fields(fields(cfg));
+        self.form
+            .set_fields(all_fields(cfg, self.app_update.as_ref()));
     }
 
     pub fn has_modal(&self) -> bool {
-        self.form.has_modal()
+        self.form.has_modal() || self.app_update.as_ref().is_some_and(AppUpdate::has_modal)
+    }
+
+    /// Show the APP row as its update stands now.
+    fn sync_app_update(&mut self) {
+        let Some(update) = &mut self.app_update else {
+            return;
+        };
+        update.poll();
+        let field = update.field();
+        if let Some(row) = self
+            .form
+            .fields
+            .iter_mut()
+            .find(|f| f.id == app_update::FIELD)
+        {
+            *row = field;
+        }
     }
 
     fn form_area(area: Rect) -> Rect {
@@ -171,8 +203,19 @@ impl Settings {
 
     /// The key saved to `config.txt`, if any (the app reloads it).
     pub fn update(&mut self, ui: &mut Ui, area: Rect, cfg: &Config) -> Option<String> {
-        let FormEvent::Changed(id) = self.form.update(ui, Settings::form_area(area))? else {
+        self.sync_app_update();
+        if let Some(update) = self.app_update.as_mut().filter(|u| u.has_modal()) {
+            update.update_modal(ui, area);
             return None;
+        }
+        let id = match self.form.update(ui, Settings::form_area(area))? {
+            FormEvent::Changed(id) => id,
+            FormEvent::Pressed(id) => {
+                if let Some(update) = self.app_update.as_mut().filter(|_| id == app_update::FIELD) {
+                    update.press();
+                }
+                return None;
+            }
         };
         let value = self.form.value(&id).to_string();
         match config::update_file(&cfg.path, &BTreeMap::from([(id.clone(), value)])) {
@@ -197,10 +240,16 @@ impl Settings {
             );
         }
         self.form.draw(ui, Settings::form_area(area));
+        if let Some(update) = &self.app_update {
+            update.draw_modal(ui, area);
+        }
     }
 
     pub fn hints(&self, ui: &Ui) -> Vec<Hint> {
-        self.form.hints(ui)
+        self.app_update
+            .as_ref()
+            .and_then(|update| update.modal_hints(ui))
+            .unwrap_or_else(|| self.form.hints(ui))
     }
 }
 

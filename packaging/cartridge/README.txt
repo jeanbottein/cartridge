@@ -34,8 +34,11 @@ TWO CARTRIDGES, ONE STEAM
   original on the same machine, delete system/cartridge-id in the copy.
 
 UPDATING
-  Extract a newer release over this folder: the app and these READMEs are
-  replaced, your settings and games are left untouched.
+  SETTINGS > APP checks for a newer release and installs it: only the app is
+  replaced, at the next launch. Or extract a newer release over this folder:
+  the app and these READMEs are replaced, your settings and games are left
+  untouched. Games written by a newer •cartridge are read-only in an older
+  one, and machines of another version say which one to update.
 
 FIRST LAUNCH, PER SYSTEM
   Linux / Steam Deck: if the AppImage won't start, make it executable

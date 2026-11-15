@@ -780,7 +780,10 @@ mod tests {
         let package = dir.path().join(format!("Celeste{EXTENSION}"));
         pack(&game, &package, &Progress::default()).unwrap();
         let dest = unpack(&package, &dir.mkdir("target"), &Progress::default()).unwrap();
-        assert_eq!(fs::read(dest.join(GAME_DATA_DIR).join(GAME_JSON)).unwrap(), body);
+        assert_eq!(
+            fs::read(dest.join(GAME_DATA_DIR).join(GAME_JSON)).unwrap(),
+            body
+        );
     }
 
     #[test]

@@ -65,7 +65,7 @@ struct GithubRelease {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Archive {
+pub(super) enum Archive {
     TarGz,
     Zip,
 }
@@ -75,7 +75,7 @@ fn is_appimage(name: &str) -> bool {
     name.to_lowercase().ends_with(".appimage")
 }
 
-fn archive_of(name: &str) -> Option<Archive> {
+pub(super) fn archive_of(name: &str) -> Option<Archive> {
     let name = name.to_lowercase();
     if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
         Some(Archive::TarGz)
@@ -297,7 +297,7 @@ fn record(update: &mut Update, tag: &str, asset: Option<&Asset>) {
 // ── Installing ───────────────────────────────────────────────────────────
 
 /// Stream `asset` into `dest`, counting bytes in `progress`.
-fn download(asset: &Asset, dest: &Path, progress: &Progress) -> Result<(), String> {
+pub(super) fn download(asset: &Asset, dest: &Path, progress: &Progress) -> Result<(), String> {
     progress.start(asset.size);
     let response = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(10))
@@ -389,7 +389,12 @@ fn fresh_dir(dir: &Path) -> Result<(), String> {
 /// `inner` (zips that wrap a `.tar.gz` so the exec bits survive). Returns
 /// the folder holding the files. Each archive is deleted once unpacked: an
 /// update needs its size on disk once, not three times.
-fn unpack(kind: Archive, archive: &Path, outer: &Path, inner: &Path) -> Result<PathBuf, String> {
+pub(super) fn unpack(
+    kind: Archive,
+    archive: &Path,
+    outer: &Path,
+    inner: &Path,
+) -> Result<PathBuf, String> {
     fresh_dir(outer)?;
     extract(kind, archive, outer)?;
     let _ = fs::remove_file(archive);

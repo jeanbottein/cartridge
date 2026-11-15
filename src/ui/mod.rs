@@ -3,6 +3,7 @@
 //! gamepad, keyboard or mouse, in the theme picked in Settings.
 
 mod app;
+mod app_update;
 mod browser;
 mod covers;
 mod dialog;

@@ -122,7 +122,11 @@ impl Network {
             .iter()
             .filter_map(|(peer, games)| {
                 games.as_ref().err()?;
-                Some(peer.info.mismatch().unwrap_or_else(|| peer.info.name.clone()))
+                Some(
+                    peer.info
+                        .mismatch()
+                        .unwrap_or_else(|| peer.info.name.clone()),
+                )
             })
             .collect();
         self.peers = found.iter().map(|(peer, _)| peer.clone()).collect();
