@@ -48,7 +48,7 @@ For example, this `game.json` entry works for both Windows native and Linux Prot
 ```json
 {
   "os": "windows",
-  "path": "%USERPROFILE%/AppData/LocalLow/by Sam Eng/SKATE STORY"
+  "path": "%USERPROFILE%/AppData/LocalLow/Studio/Game"
 }
 ```
 
