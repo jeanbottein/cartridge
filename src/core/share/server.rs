@@ -83,6 +83,28 @@ pub struct Server {
     threads: Vec<JoinHandle<()>>,
 }
 
+/// The HTTP listener on `port` and the discovery socket on the same number
+/// (`None` when UDP has it taken: sharing works, discovery doesn't). Any
+/// free port (0) is only checked free for TCP: another is drawn until UDP
+/// has it free too.
+fn bind(ip: IpAddr, port: u16) -> io::Result<(TcpListener, Option<UdpSocket>)> {
+    const DRAWS: usize = 20;
+    let mut draws = 1;
+    // A loop: each draw is a new free port.
+    loop {
+        let listener = TcpListener::bind((ip, port))?;
+        let number = listener.local_addr()?.port();
+        match UdpSocket::bind((ip, number)) {
+            Ok(udp) => return Ok((listener, Some(udp))),
+            Err(_) if port == 0 && draws < DRAWS => draws += 1,
+            Err(e) => {
+                warn!("Discovery disabled (UDP port {number}): {e}");
+                return Ok((listener, None));
+            }
+        }
+    }
+}
+
 impl Server {
     /// Listen on `port` (TCP for HTTP, UDP for discovery) on every interface.
     pub fn start(games_dir: &Path, name: String, port: u16) -> io::Result<Server> {
@@ -90,21 +112,18 @@ impl Server {
     }
 
     fn start_on(games_dir: &Path, name: String, ip: IpAddr, port: u16) -> io::Result<Server> {
-        let listener = TcpListener::bind((ip, port))?;
+        let (listener, udp) = bind(ip, port)?;
         let addr = listener.local_addr()?;
         let shared = Arc::new(Shared::new(games_dir, ServerInfo::new(name, addr.port())));
         let accept_shared = Arc::clone(&shared);
         let mut threads = vec![std::thread::spawn(move || {
             accept_loop(listener, accept_shared)
         })];
-        match UdpSocket::bind((ip, addr.port())) {
-            Ok(socket) => {
-                let udp_shared = Arc::clone(&shared);
-                threads.push(std::thread::spawn(move || {
-                    discovery::answer_loop(socket, udp_shared)
-                }));
-            }
-            Err(e) => warn!("Discovery disabled (UDP port {}): {e}", addr.port()),
+        if let Some(socket) = udp {
+            let udp_shared = Arc::clone(&shared);
+            threads.push(std::thread::spawn(move || {
+                discovery::answer_loop(socket, udp_shared)
+            }));
         }
         info!(
             "Sharing {} as \"{}\" on port {} (TCP + UDP)",
@@ -367,6 +386,31 @@ pub mod tests {
         assert_eq!(route("POST /api/v1/games HTTP/1.1").unwrap_err().0, 405);
         assert_eq!(route("GET /etc/passwd HTTP/1.1").unwrap_err().0, 404);
         assert_eq!(route("").unwrap_err().0, 400);
+    }
+
+    #[test]
+    fn any_free_port_is_free_for_discovery_too() {
+        let localhost = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        for _ in 0..50 {
+            let (tcp, udp) = bind(localhost, 0).unwrap();
+            let udp = udp.expect("a UDP socket on the drawn port");
+            assert_eq!(
+                udp.local_addr().unwrap().port(),
+                tcp.local_addr().unwrap().port()
+            );
+        }
+    }
+
+    #[test]
+    fn a_fixed_port_taken_for_udp_disables_only_discovery() {
+        let localhost = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let taken = UdpSocket::bind((localhost, 0)).unwrap();
+        let port = taken.local_addr().unwrap().port();
+        // The same number may be taken for TCP too: nothing to check then.
+        if let Ok((tcp, udp)) = bind(localhost, port) {
+            assert_eq!(tcp.local_addr().unwrap().port(), port);
+            assert!(udp.is_none());
+        }
     }
 
     /// Loopback only, so tests never open a port on the network.
