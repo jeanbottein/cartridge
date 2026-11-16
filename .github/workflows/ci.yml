@@ -1,7 +1,10 @@
 name: CI
 
 on:
+  # Branches are tested through their pull request: a push there too would
+  # run every job twice (macOS runners are the scarcest).
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 

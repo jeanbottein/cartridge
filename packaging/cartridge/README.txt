@@ -8,6 +8,10 @@ label in the app and in Steam.
 
   the app         cartridge.exe (Windows), Cartridge.app (macOS),
                   Cartridge.AppImage (Linux / Steam Deck)
+                  The universal cartridge holds them all, the Linux ones as
+                  Cartridge-x86_64.AppImage (PC, Steam Deck) and
+                  Cartridge-arm64.AppImage, plus start.sh, which runs the
+                  right one from a terminal (Linux, macOS)
   system/         settings (config.txt, created on first launch), caches
   games/          one folder per game
   mods/           patches and file replacements
@@ -34,7 +38,8 @@ TWO CARTRIDGES, ONE STEAM
 
 UPDATING
   SETTINGS > APP checks for a newer release and installs it: only the app is
-  replaced, at the next launch. Or extract a newer release over this folder:
+  replaced, at the next launch (in the universal cartridge, every app this
+  folder holds, so they stay one version). Or extract a newer release over this folder:
   the app and these READMEs are replaced, your settings and games are left
   untouched. Games written by a newer •cartridge are read-only in an older
   one, and machines of another version say which one to update.

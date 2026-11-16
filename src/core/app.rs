@@ -50,6 +50,16 @@ pub const FOLDERS: [&str; 3] = [GAMES_DIR, MODS_DIR, SAVES_COPIES_DIR];
 /// never created up front.
 pub const SAVES_LINKS_DIR: &str = "saves-links";
 
+/// The universal cartridge (universal.sh) holds every system's app side by
+/// side, all sharing one `system/`, and `start.sh` to run the right one.
+pub const UNIVERSAL_APPS: [&str; 4] = [
+    "Cartridge-x86_64.AppImage",
+    "Cartridge-arm64.AppImage",
+    "Cartridge.app",
+    "cartridge.exe",
+];
+pub const LAUNCHER: &str = "start.sh";
+
 /// Marks a `system/` folder as ours even before `config.txt` exists (e.g.
 /// freshly unpacked from a release archive).
 pub const WORKSPACE_README: &str = "README.txt";

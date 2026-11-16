@@ -133,8 +133,54 @@ jobs:
           name: ${{ matrix.archive }}
           path: upload/
 
-  release:
+  # Every system's app in one cartridge (universal.sh), from the archives
+  # the build job just smoke-tested.
+  universal:
     needs: build
+    runs-on: ubuntu-latest
+    env:
+      CARTRIDGE_REPO: ${{ github.repository }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      - name: Universal cartridge
+        run: |
+          mkdir -p dist
+          find artifacts -path '*/bare/*' -prune -o -type f -exec cp {} dist/ \;
+          bash universal.sh dist
+
+      - name: Runtime libs
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev libx11-dev libxi-dev libgl1-mesa-dev libasound2-dev
+
+      # Through start.sh, as users run it: it must pick the x86_64 AppImage,
+      # which must find the shared system/ folder.
+      - name: Smoke-test the archive
+        run: |
+          test_dir="$RUNNER_TEMP/extracted"
+          mkdir -p "$test_dir"
+          unzip -q dist/cartridge-universal.zip -d "$test_dir"
+          cd "$RUNNER_TEMP"
+          for app in start.sh Cartridge-x86_64.AppImage Cartridge-arm64.AppImage Cartridge.app cartridge.exe; do
+            test -e "$test_dir/Cartridge/$app"
+          done
+          APPIMAGE_EXTRACT_AND_RUN=1 "$test_dir/Cartridge/start.sh" --version \
+            | grep -F "(updates from $CARTRIDGE_REPO)"
+          APPIMAGE_EXTRACT_AND_RUN=1 "$test_dir/Cartridge/start.sh" --peers < /dev/null
+          test -f "$test_dir/Cartridge/system/config.txt"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: cartridge-universal
+          path: dist/cartridge-universal.zip
+
+  release:
+    needs: [build, universal]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:

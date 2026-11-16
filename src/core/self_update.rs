@@ -7,7 +7,8 @@
 //! package.sh): only the app is taken from the archive and put in place of
 //! the running one, which is moved aside first and removed at the next
 //! launch. The download is checked against the sha256 GitHub publishes for
-//! it (see `updater::download`).
+//! it (see `updater::download`). In a universal cartridge (the apps of
+//! several systems side by side) the universal archive replaces them all.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -61,6 +62,33 @@ fn shipped_name() -> &'static str {
     }
 }
 
+/// This system's app in the universal cartridge (`app::UNIVERSAL_APPS`).
+fn universal_name() -> &'static str {
+    match (platform::os_tag(), platform::arch_tag()) {
+        ("macos", _) => "Cartridge.app",
+        ("windows", _) => "cartridge.exe",
+        (_, "arm64") => "Cartridge-arm64.AppImage",
+        _ => "Cartridge-x86_64.AppImage",
+    }
+}
+
+/// The universal cartridge's release file (universal.sh).
+const UNIVERSAL_ARCHIVE: &str = "cartridge-universal.zip";
+
+/// `dir` holds the apps of several systems: an update takes them all from
+/// the universal archive, so they stay one version.
+fn is_universal(dir: &Path) -> bool {
+    app::UNIVERSAL_APPS
+        .iter()
+        .filter(|name| dir.join(name).exists())
+        .count()
+        > 1
+}
+
+fn universal_asset(release: &Release) -> Option<&Asset> {
+    release.assets.iter().find(|a| a.name == UNIVERSAL_ARCHIVE)
+}
+
 fn this_machine() -> Platform {
     Platform {
         os: platform::os_tag().into(),
@@ -83,7 +111,13 @@ pub fn check(repo: &str) -> Result<Option<Available>, String> {
     if !is_newer(&release.tag, VERSION) {
         return Ok(None);
     }
-    let asset = updater::pick_asset(&release, &this_machine(), "")
+    let universal = target().is_ok_and(|t| t.parent().is_some_and(is_universal));
+    let asset = if universal {
+        universal_asset(&release)
+    } else {
+        updater::pick_asset(&release, &this_machine(), "")
+    };
+    let asset = asset
         .cloned()
         .ok_or_else(|| format!("{} has no file for this machine", release.tag))?;
     Ok(Some(Available { release, asset }))
@@ -119,9 +153,8 @@ pub fn remove_previous(target: &Path) {
     }
 }
 
-/// The app in an unpacked release: at its top or in its top folder.
-fn find_app(root: &Path) -> Result<PathBuf, String> {
-    let name = shipped_name();
+/// The app `name` in an unpacked release: at its top or in its top folder.
+fn find_app(root: &Path, name: &str) -> Result<PathBuf, String> {
     std::iter::once(root.to_path_buf())
         .chain(paths::visible_subdirs(root))
         .map(|dir| dir.join(name))
@@ -146,6 +179,32 @@ fn swap(new: &Path, target: &Path) -> Result<(), String> {
     })
 }
 
+/// Put the apps of the unpacked universal cartridge `root` in place of
+/// `target` and of the other apps next to it (only those this folder
+/// holds), and `start.sh`. The running app waits for the next launch to be
+/// removed; the others go at once.
+fn swap_universal(root: &Path, target: &Path) -> Result<(), String> {
+    let new = find_app(root, universal_name())?;
+    let (from, here) = (
+        new.parent().unwrap_or(root),
+        target.parent().unwrap_or(root),
+    );
+    // The running app last: if another one fails, it is still the old
+    // version, as the error says.
+    app::UNIVERSAL_APPS
+        .iter()
+        .chain([&app::LAUNCHER])
+        .filter(|name| **name != universal_name())
+        .map(|name| (from.join(name), here.join(name)))
+        .filter(|(new, old)| new.exists() && old.exists())
+        .try_for_each(|(new, old)| {
+            swap(&new, &old)?;
+            remove_previous(&old);
+            Ok::<(), String>(())
+        })?;
+    swap(&new, target)
+}
+
 /// Download `asset` and put the app it holds in place of `target`.
 /// Everything is staged under hidden names next to `target` (same
 /// filesystem: the swap is two renames), removed whatever happens.
@@ -155,14 +214,17 @@ pub fn install(asset: &Asset, target: &Path, progress: &Progress) -> Result<(), 
     let (download, unpacked, inner) = (staged("download"), staged("update"), staged("inner"));
     let result = (|| {
         updater::download(asset, &download, progress)?;
-        let app = match updater::archive_of(&asset.name) {
-            Some(kind) => find_app(&updater::unpack(kind, &download, &unpacked, &inner)?)?,
-            None => download.clone(),
-        };
+        let root = updater::archive_of(&asset.name)
+            .map(|kind| updater::unpack(kind, &download, &unpacked, &inner))
+            .transpose()?;
         if progress.is_cancelled() {
             return Err("cancelled".into());
         }
-        swap(&app, target)
+        match root {
+            None => swap(&download, target),
+            Some(root) if asset.name == UNIVERSAL_ARCHIVE => swap_universal(&root, target),
+            Some(root) => swap(&find_app(&root, shipped_name())?, target),
+        }
     })();
     [&download, &unpacked, &inner]
         .into_iter()
@@ -185,29 +247,82 @@ mod tests {
         assert!(!is_newer("nightly", "0.2.0"));
     }
 
-    #[test]
-    fn picks_this_machines_cartridge_archive() {
-        let asset = |name: &str| Asset {
-            name: name.into(),
+    fn release_of(names: &[&str]) -> Release {
+        let asset = |name: &&str| Asset {
+            name: (*name).into(),
             size: 1,
             url: String::new(),
             build: String::new(),
         };
-        let release = Release {
+        Release {
             tag: "v9.0.0".into(),
             name: String::new(),
             date: String::new(),
             notes: String::new(),
-            assets: [
-                "SHA256SUMS",
-                "cartridge-linux-aarch64.tar.gz",
-                "cartridge-linux-x86_64.tar.gz",
-                "cartridge-macos-arm64.zip",
-                "cartridge-windows-x86_64.zip",
-            ]
-            .map(asset)
-            .to_vec(),
-        };
+            assets: names.iter().map(asset).collect(),
+        }
+    }
+
+    const RELEASE: [&str; 6] = [
+        "SHA256SUMS",
+        "cartridge-linux-aarch64.tar.gz",
+        "cartridge-linux-x86_64.tar.gz",
+        "cartridge-macos-arm64.zip",
+        "cartridge-universal.zip",
+        "cartridge-windows-x86_64.zip",
+    ];
+
+    #[test]
+    fn a_universal_cartridge_takes_the_universal_archive() {
+        let release = release_of(&RELEASE);
+        assert_eq!(
+            universal_asset(&release).unwrap().name,
+            "cartridge-universal.zip"
+        );
+        assert!(universal_asset(&release_of(&RELEASE[..4])).is_none());
+    }
+
+    #[test]
+    fn a_folder_with_the_apps_of_two_systems_is_universal() {
+        let dir = TempDir::new();
+        dir.write("one/cartridge.exe", b"");
+        assert!(!is_universal(&dir.path().join("one")));
+        dir.write("two/cartridge.exe", b"");
+        dir.write("two/Cartridge-x86_64.AppImage", b"");
+        assert!(is_universal(&dir.path().join("two")));
+    }
+
+    #[test]
+    fn a_universal_update_replaces_every_app_the_folder_holds() {
+        let dir = TempDir::new();
+        let others: Vec<&str> = app::UNIVERSAL_APPS
+            .into_iter()
+            .filter(|name| *name != universal_name())
+            .collect();
+        let (kept, absent) = (others[0], others[1]);
+        for name in [universal_name(), kept, app::LAUNCHER] {
+            dir.write(&format!("mine/{name}"), b"old");
+        }
+        for name in app::UNIVERSAL_APPS.iter().chain([&app::LAUNCHER]) {
+            dir.write(&format!("release/Cartridge/{name}"), b"new");
+        }
+        let target = dir.path().join("mine").join(universal_name());
+
+        swap_universal(&dir.path().join("release"), &target).unwrap();
+        for name in [universal_name(), kept, app::LAUNCHER] {
+            assert_eq!(
+                fs::read(dir.path().join("mine").join(name)).unwrap(),
+                b"new"
+            );
+        }
+        assert!(!dir.path().join("mine").join(absent).exists());
+        assert!(previous_of(&target).exists(), "the running app waits");
+        assert!(!previous_of(&dir.path().join("mine").join(kept)).exists());
+    }
+
+    #[test]
+    fn picks_this_machines_cartridge_archive() {
+        let release = release_of(&RELEASE);
         let expected = match (platform::os_tag(), platform::arch_tag()) {
             ("linux", "x64") => "cartridge-linux-x86_64.tar.gz",
             ("linux", "arm64") => "cartridge-linux-aarch64.tar.gz",
@@ -224,9 +339,9 @@ mod tests {
         let dir = TempDir::new();
         dir.write("Cartridge/README.txt", b"");
         dir.write(&format!("Cartridge/{}", shipped_name()), b"new");
-        let found = find_app(dir.path()).unwrap();
+        let found = find_app(dir.path(), shipped_name()).unwrap();
         assert_eq!(found, dir.path().join("Cartridge").join(shipped_name()));
-        assert!(find_app(&dir.mkdir("empty")).is_err());
+        assert!(find_app(&dir.mkdir("empty"), shipped_name()).is_err());
     }
 
     #[test]
