@@ -14,7 +14,6 @@ Potato-games/          # any name: the cartridge's label
 ├── games/
 ├── mods/
 ├── saves-copies/
-├── saves-links/
 └── system/            # settings (config.txt), caches
 ```
 
@@ -73,7 +72,7 @@ On Linux, Windows games start from the app with the Proton builds Steam installe
 ## Getting started
 
 1. Download the archive for your platform from the [releases](https://github.com/jeanbottein/cartouche/releases): `cartridge-linux-x86_64.tar.gz` (Steam Deck, desktop Linux), `cartridge-linux-aarch64.tar.gz`, `cartridge-macos-arm64.zip` or `cartridge-windows-x86_64.zip`.
-2. Extract it where you want your cartridge. You get a ready-made `Cartridge/` folder (rename it: that's its label) holding the app (`Cartridge.AppImage`, `Cartridge.app` or `cartridge.exe`), an empty `system/`, `games/`, `mods/`, `saves-copies/` and `saves-links/`. Keep the app inside that folder: it looks for `system/` right next to itself. To put a folder elsewhere, replace it with a symbolic link.
+2. Extract it where you want your cartridge. You get a ready-made `Cartridge/` folder (rename it: that's its label) holding the app (`Cartridge.AppImage`, `Cartridge.app` or `cartridge.exe`), an empty `system/`, `games/`, `mods/` and `saves-copies/`. Keep the app inside that folder: it looks for `system/` right next to itself. To put a folder elsewhere, replace it with a symbolic link.
 3. Launch the app (first launch creates `system/config.txt`). If it won't start:
    - **Linux / Steam Deck:** make the AppImage executable (`chmod +x Cartridge.AppImage`), and don't let an AppImage manager (Gear Lever, AppImageLauncher) move it out of the folder.
    - **macOS:** the app isn't notarized. Right-click `Cartridge.app` > Open; if it says it runs from a temporary copy, run `xattr -dr com.apple.quarantine /path/to/Cartridge` once.

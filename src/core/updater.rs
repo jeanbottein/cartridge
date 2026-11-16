@@ -8,13 +8,15 @@
 
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use zip::read::{ExtractOptions, SymlinkExtractAction};
 
 use super::app::GAME_DATA_DIR;
+use super::links::{points_inside, Links};
 use super::models::{Game, Update, NEWER_APP};
 use super::package::{self, Kind, Progress};
 use super::{paths, platform, sgdb};
@@ -362,15 +364,66 @@ pub(super) fn download(asset: &Asset, dest: &Path, progress: &Progress) -> Resul
 fn extract(kind: Archive, archive: &Path, dest: &Path) -> Result<(), String> {
     let file = BufReader::new(File::open(archive).map_err(|e| e.to_string())?);
     match kind {
-        Archive::TarGz => {
-            let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(file));
-            tar.set_preserve_permissions(true);
-            tar.unpack(dest).map_err(|e| e.to_string())
-        }
-        Archive::Zip => zip::ZipArchive::new(file)
-            .and_then(|mut zip| zip.extract(dest))
-            .map_err(|e| e.to_string()),
+        Archive::TarGz => extract_tar_gz(file, dest).map_err(|e| e.to_string()),
+        Archive::Zip => extract_zip(file, dest).map_err(|e| e.to_string()),
     }
+}
+
+/// Links go through `Links`: copies where the filesystem has none.
+fn extract_tar_gz(file: impl Read, dest: &Path) -> io::Result<()> {
+    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    tar.set_preserve_permissions(true);
+    let mut links = Links::default();
+    for entry in tar.entries()? {
+        let mut entry = entry?;
+        if !entry.header().entry_type().is_symlink() {
+            entry.unpack_in(dest)?;
+            continue;
+        }
+        let rel: PathBuf = entry
+            .path()?
+            .components()
+            .filter(|c| !matches!(c, Component::CurDir))
+            .collect();
+        let target = entry.link_name()?.unwrap_or_default().into_owned();
+        let link = package::safe_join(dest, &rel).map_err(io::Error::other)?;
+        links.add(&target, &link)?;
+    }
+    links.copy_refused(dest)
+}
+
+/// The zip reader makes the files; its links, those that stay inside
+/// `dest`, go through `Links`.
+fn extract_zip(file: impl Read + io::Seek, dest: &Path) -> zip::result::ZipResult<()> {
+    let mut zip = zip::ZipArchive::new(file)?;
+    let options = ExtractOptions::default().symlink_action(SymlinkExtractAction::NoExtract);
+    zip.extract_with_options(dest, options)?;
+    let mut links = Links::default();
+    for (rel, target) in zip_links(&mut zip)? {
+        let link = dest.join(rel);
+        if points_inside(dest, &link, &target) {
+            links.add(&target, &link)?;
+        }
+    }
+    Ok(links.copy_refused(dest)?)
+}
+
+/// `(path, target)` of each link in `zip`.
+fn zip_links(
+    zip: &mut zip::ZipArchive<impl Read + io::Seek>,
+) -> zip::result::ZipResult<Vec<(PathBuf, PathBuf)>> {
+    let mut links = Vec::new();
+    // A loop: each entry borrows the archive.
+    for index in 0..zip.len() {
+        let mut entry = zip.by_index(index)?;
+        let Some(rel) = entry.enclosed_name().filter(|_| entry.is_symlink()) else {
+            continue;
+        };
+        let mut target = String::new();
+        entry.read_to_string(&mut target)?;
+        links.push((rel, PathBuf::from(target)));
+    }
+    Ok(links)
 }
 
 /// Folders archivers add beside the content (macOS resource forks): never
@@ -493,7 +546,12 @@ fn replace_file(src: &Path, dest: &Path) -> io::Result<()> {
 }
 
 /// Lay one item over the game (checked by `conflict` first).
-fn place(item: &package::Item, src_root: &Path, game_dir: &Path) -> io::Result<()> {
+fn place(
+    item: &package::Item,
+    src_root: &Path,
+    game_dir: &Path,
+    links: &mut Links,
+) -> io::Result<()> {
     let (src, dest) = (src_root.join(&item.rel), game_dir.join(&item.rel));
     match &item.kind {
         Kind::Dir => fs::create_dir_all(&dest),
@@ -502,7 +560,7 @@ fn place(item: &package::Item, src_root: &Path, game_dir: &Path) -> io::Result<(
             if fs::symlink_metadata(&dest).is_ok() {
                 fs::remove_file(&dest)?;
             }
-            package::make_symlink(target, &dest)
+            links.add(target, &dest)
         }
     }
 }
@@ -520,14 +578,17 @@ fn upsert(src_root: &Path, game_dir: &Path) -> Result<usize, String> {
     if let Some(why) = items.iter().find_map(|item| conflict(item, game_dir)) {
         return Err(why);
     }
-    items
+    let mut links = Links::default();
+    let files = items
         .iter()
         .map(|item| {
-            place(item, src_root, game_dir)
+            place(item, src_root, game_dir, &mut links)
                 .map(|()| usize::from(item.kind != Kind::Dir))
                 .map_err(|e| format!("{}: {e}", item.rel.display()))
         })
-        .sum()
+        .sum::<Result<usize, String>>()?;
+    links.copy_refused(game_dir).map_err(|e| e.to_string())?;
+    Ok(files)
 }
 
 /// Put the downloaded program `file` in place of the game's executable
@@ -1078,6 +1139,62 @@ mod tests {
         extract(Archive::TarGz, &archive, &dest).unwrap();
         assert_eq!(fs::read(dest.join("data/x")).unwrap(), b"x");
         assert!(platform::has_exec_permission(&dest.join("Game")));
+    }
+
+    fn tar_gz_with_link(link: &str, target: &str) -> Vec<u8> {
+        let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::fast(),
+        ));
+        let mut header = tar::Header::new_gnu();
+        header.set_size(3);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "./game.bin", &b"bin"[..])
+            .unwrap();
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_size(0);
+        builder.append_link(&mut header, link, target).unwrap();
+        builder.into_inner().unwrap().finish().unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extracts_the_links_of_a_tar_gz() {
+        let dir = TempDir::new();
+        let archive = dir.write("a.tar.gz", &tar_gz_with_link("./run", "game.bin"));
+        let dest = dir.mkdir("out");
+        extract(Archive::TarGz, &archive, &dest).unwrap();
+        assert_eq!(
+            fs::read_link(dest.join("run")).unwrap(),
+            Path::new("game.bin")
+        );
+    }
+
+    fn zip_with_links(links: &[(&str, &str)]) -> Vec<u8> {
+        let mut zip = zip::ZipWriter::new(io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("game.bin", options).unwrap();
+        zip.write_all(b"bin").unwrap();
+        for (link, target) in links {
+            zip.add_symlink(*link, *target, options).unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extracts_the_links_of_a_zip_that_stay_inside() {
+        let dir = TempDir::new();
+        let links = [("bin/run", "../game.bin"), ("key", "/etc/passwd")];
+        let archive = dir.write("a.zip", &zip_with_links(&links));
+        let dest = dir.mkdir("out");
+        extract(Archive::Zip, &archive, &dest).unwrap();
+        assert_eq!(fs::read(dest.join("bin/run")).unwrap(), b"bin");
+        assert!(paths::is_symlink(&dest.join("bin/run")));
+        assert!(fs::symlink_metadata(dest.join("key")).is_err());
     }
 
     #[test]

@@ -21,6 +21,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use super::app::GAME_DATA_DIR;
+use super::links::Links;
 use super::models::{to_pretty_json, Game, GAME_JSON};
 use super::paths;
 
@@ -524,21 +525,6 @@ fn set_mode(_path: &Path, _mode: u32) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
-pub(crate) fn make_symlink(target: &Path, link: &Path) -> io::Result<()> {
-    std::os::unix::fs::symlink(target, link)
-}
-
-#[cfg(not(unix))]
-pub(crate) fn make_symlink(target: &Path, link: &Path) -> io::Result<()> {
-    log::warn!(
-        "Skipping symlink {} -> {}",
-        link.display(),
-        target.display()
-    );
-    Ok(())
-}
-
 /// Write one regular file entry; returns (bytes, checksum).
 fn write_file<R: Read>(
     entry: &mut tar::Entry<'_, R>,
@@ -609,6 +595,7 @@ fn extract<R: Read>(
 ) -> Result<u64, String> {
     let data = PathBuf::from(GAME_DATA_DIR);
     let mut game_bytes = 0;
+    let mut links = Links::default();
     for_each_checked(entries, manifest, |rel, entry| {
         let dest = safe_join(staging, rel)?;
         let fail = |e: io::Error| format!("{}: {e}", rel.display());
@@ -626,11 +613,12 @@ fn extract<R: Read>(
                     .link_name()
                     .map_err(fail)?
                     .ok_or_else(|| format!("{}: symlink without target", rel.display()))?;
-                make_symlink(&target, &dest).map_err(fail).map(|()| None)
+                links.add(&target, &dest).map_err(fail).map(|()| None)
             }
             other => Err(format!("{}: unsupported entry {other:?}", rel.display())),
         }
     })?;
+    links.copy_refused(staging).map_err(|e| e.to_string())?;
     Ok(game_bytes)
 }
 
@@ -726,6 +714,7 @@ pub fn unpack(package: &Path, games_dir: &Path, progress: &Progress) -> Result<P
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::links::make_symlink;
     use crate::core::testutil::TempDir;
 
     fn sample_game(dir: &TempDir) -> Game {

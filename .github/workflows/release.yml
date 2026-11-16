@@ -116,7 +116,7 @@ jobs:
             | grep -F "${CARTRIDGE_VERSION:+$CARTRIDGE_VERSION }(updates from $CARTRIDGE_REPO)"
           APPIMAGE_EXTRACT_AND_RUN=1 "$test_dir/Cartridge/${{ matrix.run }}" --peers < /dev/null
           test -f "$test_dir/Cartridge/system/config.txt"
-          for folder in games mods saves-copies saves-links; do
+          for folder in games mods saves-copies; do
             test -d "$test_dir/Cartridge/$folder"
           done
 

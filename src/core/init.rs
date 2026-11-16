@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use log::{error, info};
 
 use super::app::{
-    is_translocated, is_workspace, launched_file, DISPLAY_NAME, FOLDERS, WORKSPACE_DIR,
-    WORKSPACE_README,
+    is_translocated, is_workspace, launched_file, DISPLAY_NAME, FOLDERS, SAVES_LINKS_DIR,
+    WORKSPACE_DIR, WORKSPACE_README,
 };
 use super::config::DEFAULT_CONFIG;
 use super::paths;
@@ -64,7 +64,7 @@ pub fn config_in(system_dir: &Path) -> PathBuf {
 }
 
 /// Entries a cartridge holds besides the app and its `FOLDERS`.
-const CARTRIDGE_FILES: [&str; 3] = [WORKSPACE_DIR, "README.txt", ".DS_Store"];
+const CARTRIDGE_FILES: [&str; 4] = [WORKSPACE_DIR, SAVES_LINKS_DIR, "README.txt", ".DS_Store"];
 
 fn is_cartridge_entry(name: &str) -> bool {
     FOLDERS.contains(&name) || CARTRIDGE_FILES.contains(&name)
@@ -161,7 +161,9 @@ pub fn run_terminal_wizard(exe_dir: &Path, cwd: &Path) -> Option<PathBuf> {
     for line in folder_advice(exe_dir) {
         eprintln!("\n{line}");
     }
-    eprintln!("\nWhere to create the cartridge ({WORKSPACE_DIR}/, games/, mods/, saves-copies/, saves-links/):\n");
+    eprintln!(
+        "\nWhere to create the cartridge ({WORKSPACE_DIR}/, games/, mods/, saves-copies/):\n"
+    );
     for (i, (label, path)) in locations.iter().enumerate() {
         eprintln!("  {}. {label}  ({})", i + 1, path.display());
     }
@@ -231,7 +233,13 @@ mod tests {
         let config = config_in(&dir.path().join("system"));
         assert!(config.is_file());
         assert!(dir.path().join("games").is_dir());
-        assert!(dir.path().join("saves-links").is_dir());
+        assert!(!dir.path().join("saves-links").exists());
+    }
+
+    #[test]
+    fn a_saves_links_folder_is_part_of_the_cartridge() {
+        let names = vec!["system".to_string(), "saves-links".to_string()];
+        assert_eq!(unrelated_entries(&names, None), 0);
     }
 
     #[test]

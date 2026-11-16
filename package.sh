@@ -7,7 +7,7 @@
 #     LICENSE.txt     the app's license and its embedded fonts'
 #     system/         workspace; config.txt is created on first launch, so
 #                     extracting a newer release over it keeps the settings
-#     games/ mods/ saves-copies/ saves-links/   (each with a README.txt)
+#     games/ mods/ saves-copies/   (each with a README.txt)
 #
 # Usage: ./package.sh <app file or .app> <app name in the archive> <archive base name>
 #   ./package.sh dist/cartridge-linux-x86_64.AppImage Cartridge.AppImage cartridge-linux-x86_64

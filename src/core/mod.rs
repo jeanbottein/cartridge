@@ -7,6 +7,7 @@ pub mod bps;
 pub mod config;
 pub mod detector;
 pub mod init;
+pub mod links;
 pub mod logging;
 pub mod manifest;
 pub mod migrations;

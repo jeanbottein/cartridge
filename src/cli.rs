@@ -44,7 +44,7 @@ Files:
                                  until unpacked (--unpack or the UI).
   DIR/mods/                      Patches (folders with a patch.json)
   DIR/saves-copies/              Save backups
-  DIR/saves-links/               Links to live save folders (for Syncthing)
+  DIR/saves-links/               Links to live save folders, where links work (optional)
 
 Main settings:
   STEAM_ADD_SELF=True            Add the cartridge itself (named after DIR)
