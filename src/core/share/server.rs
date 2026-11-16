@@ -119,6 +119,11 @@ impl Server {
         let mut threads = vec![std::thread::spawn(move || {
             accept_loop(listener, accept_shared)
         })];
+        let protocols = if udp.is_some() {
+            "TCP + UDP"
+        } else {
+            "TCP only, no discovery"
+        };
         if let Some(socket) = udp {
             let udp_shared = Arc::clone(&shared);
             threads.push(std::thread::spawn(move || {
@@ -126,7 +131,7 @@ impl Server {
             }));
         }
         info!(
-            "Sharing {} as \"{}\" on port {} (TCP + UDP)",
+            "Sharing {} as \"{}\" on port {} ({protocols})",
             games_dir.display(),
             shared.info.name,
             addr.port()
@@ -404,13 +409,18 @@ pub mod tests {
     #[test]
     fn a_fixed_port_taken_for_udp_disables_only_discovery() {
         let localhost = IpAddr::V4(Ipv4Addr::LOCALHOST);
-        let taken = UdpSocket::bind((localhost, 0)).unwrap();
-        let port = taken.local_addr().unwrap().port();
-        // The same number may be taken for TCP too: nothing to check then.
-        if let Ok((tcp, udp)) = bind(localhost, port) {
-            assert_eq!(tcp.local_addr().unwrap().port(), port);
-            assert!(udp.is_none());
-        }
+        // A UDP port whose number is free for TCP (another is drawn when TCP
+        // has it too); `_taken` holds it until the checks are done.
+        let (_taken, port, tcp, udp) = (0..20)
+            .find_map(|_| {
+                let taken = UdpSocket::bind((localhost, 0)).unwrap();
+                let port = taken.local_addr().unwrap().port();
+                let (tcp, udp) = bind(localhost, port).ok()?;
+                Some((taken, port, tcp, udp))
+            })
+            .expect("a UDP port whose number is free for TCP");
+        assert_eq!(tcp.local_addr().unwrap().port(), port);
+        assert!(udp.is_none());
     }
 
     /// Loopback only, so tests never open a port on the network.
