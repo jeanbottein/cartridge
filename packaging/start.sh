@@ -2,7 +2,17 @@
 # Run the •cartridge app built for this machine (Linux, macOS): every app in
 # this folder shares its system/ and games. Arguments are passed on
 # (./start.sh --serve). On Windows, run cartridge.exe.
-dir=$(cd "$(dirname "$0")" && pwd)
+# Through links too (~/bin/cartridge -> .../start.sh): the apps sit next to
+# the real file. Plain readlink: macOS before 12.3 has no `readlink -f`.
+self=$0
+while [ -L "$self" ]; do
+    link=$(readlink "$self")
+    case "$link" in
+        /*) self=$link ;;
+        *) self=$(dirname "$self")/$link ;;
+    esac
+done
+dir=$(cd "$(dirname "$self")" && pwd)
 case "$(uname -s)-$(uname -m)" in
     Linux-x86_64) app=Cartridge-x86_64.AppImage ;;
     Linux-aarch64 | Linux-arm64) app=Cartridge-arm64.AppImage ;;
