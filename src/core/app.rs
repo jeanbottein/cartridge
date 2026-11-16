@@ -45,8 +45,10 @@ pub const WORKSPACE_DIR: &str = "system";
 pub const GAMES_DIR: &str = "games";
 pub const MODS_DIR: &str = "mods";
 pub const SAVES_COPIES_DIR: &str = "saves-copies";
+pub const FOLDERS: [&str; 3] = [GAMES_DIR, MODS_DIR, SAVES_COPIES_DIR];
+/// Optional links to the live save folders: only there where links work,
+/// never created up front.
 pub const SAVES_LINKS_DIR: &str = "saves-links";
-pub const FOLDERS: [&str; 4] = [GAMES_DIR, MODS_DIR, SAVES_COPIES_DIR, SAVES_LINKS_DIR];
 
 /// Marks a `system/` folder as ours even before `config.txt` exists (e.g.
 /// freshly unpacked from a release archive).

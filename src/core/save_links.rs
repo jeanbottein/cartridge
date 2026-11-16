@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use log::{error, info, warn};
+use log::{debug, info};
 
 use super::paths;
 
@@ -40,26 +40,37 @@ fn remove_link_folder(dir: &Path) -> bool {
     std::fs::remove_dir(dir).is_ok()
 }
 
-fn create_symlink(link: &Path, target: &Path) {
+/// Signature of `symlink(target, link)`, injected so tests can stand in for
+/// a filesystem without links.
+type MakeLink = fn(&Path, &Path) -> std::io::Result<()>;
+
+/// `link` → `target`; a real file or folder already there is the user's and
+/// is left alone.
+fn create_symlink(link: &Path, target: &Path, make_link: MakeLink) -> std::io::Result<()> {
     if paths::is_symlink(link) {
         if std::fs::read_link(link).is_ok_and(|t| t == target) {
-            return;
+            return Ok(());
         }
         let _ = remove_link(link);
     } else if link.exists() && !(link.is_dir() && remove_link_folder(link)) {
-        warn!("  {} exists and is not a symlink, skipping", link.display());
-        return;
+        debug!("  {} exists and is not a symlink, skipping", link.display());
+        return Ok(());
     }
     if let Some(dir) = link.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        std::fs::create_dir_all(dir)?;
     }
-    if let Err(e) = symlink(target, link) {
-        error!(
-            "  Error creating symlink {} -> {}: {e}",
-            link.display(),
-            target.display()
-        );
-    }
+    make_link(target, link)
+}
+
+/// The folders made for a link that could not be created, up to `root`
+/// (only the empty ones go).
+fn remove_empty_parents(link: &Path, root: &Path) {
+    link.ancestors()
+        .skip(1)
+        .take_while(|dir| dir.starts_with(root))
+        .for_each(|dir| {
+            let _ = std::fs::remove_dir(dir);
+        });
 }
 
 fn remove_stale_symlinks(root: &Path, active: &HashSet<String>) {
@@ -76,7 +87,7 @@ fn remove_stale_symlinks(root: &Path, active: &HashSet<String>) {
         }
         info!("  Removing stale symlink: {name}");
         if let Err(e) = remove_link(&path) {
-            error!("  Error removing stale symlink {}: {e}", path.display());
+            debug!("  Could not remove stale symlink {}: {e}", path.display());
         }
     }
 }
@@ -88,8 +99,10 @@ struct LinkEntry {
     source: PathBuf,
 }
 
-fn build_symlink_tree(entries: &[LinkEntry], root: &Path) {
-    let _ = std::fs::create_dir_all(root);
+/// The links are an optional view on the saves: `root` only appears with
+/// the first link, and where links can't be made (FAT/exFAT, some network
+/// shares, Windows without the right) there is no tree, without a warning.
+fn build_symlink_tree(entries: &[LinkEntry], root: &Path, make_link: MakeLink) {
     let mut created = HashSet::new();
     for entry in entries.iter().filter(|e| e.source.is_dir()) {
         let top = root.join(&entry.top);
@@ -104,7 +117,11 @@ fn build_symlink_tree(entries: &[LinkEntry], root: &Path) {
                 top.join(sub)
             }
         };
-        create_symlink(&link, &entry.source);
+        if let Err(e) = create_symlink(&link, &entry.source, make_link) {
+            debug!("  No save links in {}: {e}", root.display());
+            remove_empty_parents(&link, root);
+            return;
+        }
         created.insert(entry.top.clone());
     }
     remove_stale_symlinks(root, &created);
@@ -122,6 +139,47 @@ mod tests {
     use super::*;
     use crate::core::testutil::TempDir;
 
+    fn refuse_links(_: &Path, _: &Path) -> std::io::Result<()> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+
+    fn one_link(dir: &TempDir) -> LinkEntry {
+        LinkEntry {
+            top: "Game".into(),
+            sub: Some("saves".into()),
+            source: dir.mkdir("live/saves"),
+        }
+    }
+
+    #[test]
+    fn no_save_to_link_creates_no_folder() {
+        let dir = TempDir::new();
+        let root = dir.path().join("saves-links");
+
+        build_symlink_tree(&[], &root, symlink);
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn a_filesystem_without_links_leaves_no_folder_behind() {
+        let dir = TempDir::new();
+        let root = dir.path().join("saves-links");
+
+        build_symlink_tree(&[one_link(&dir)], &root, refuse_links);
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn a_filesystem_without_links_keeps_what_the_folder_held() {
+        let dir = TempDir::new();
+        let root = dir.path().join("saves-links");
+        dir.write("saves-links/README.txt", b"old cartridge");
+
+        build_symlink_tree(&[one_link(&dir)], &root, refuse_links);
+        assert!(root.join("README.txt").is_file());
+        assert!(!root.join("Game").exists());
+    }
+
     #[cfg(unix)]
     #[test]
     fn back_to_one_save_path_replaces_the_folder_of_links_with_a_link() {
@@ -137,7 +195,7 @@ mod tests {
             source: saves.clone(),
         };
 
-        build_symlink_tree(&[entry], &root);
+        build_symlink_tree(&[entry], &root, symlink);
         assert_eq!(std::fs::read_link(root.join("Game")).unwrap(), saves);
     }
 
@@ -155,7 +213,7 @@ mod tests {
             source: saves,
         };
 
-        build_symlink_tree(&[entry], &root);
+        build_symlink_tree(&[entry], &root, symlink);
         assert!(root.join("Game/mine.txt").is_file());
         assert!(root.join("Gone/mine.txt").is_file());
     }
@@ -168,7 +226,7 @@ mod tests {
         dir.mkdir("saves-links/Gone");
         std::os::unix::fs::symlink(dir.mkdir("live/a"), root.join("Gone/a")).unwrap();
 
-        build_symlink_tree(&[], &root);
+        build_symlink_tree(&[], &root, symlink);
         assert!(!root.join("Gone").exists());
     }
 
@@ -186,7 +244,7 @@ mod tests {
             source: source.clone(),
         });
 
-        build_symlink_tree(&entries, &root);
+        build_symlink_tree(&entries, &root, symlink);
         assert!(!paths::is_symlink(&root.join("Game")));
         assert_eq!(
             std::fs::read_link(root.join("Game/second")).unwrap(),

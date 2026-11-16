@@ -1,6 +1,6 @@
 //! First run in the UI: no cartridge next to the app yet. Explain the
 //! portable layout, then create it there (`system/`, `games/`, `mods/`,
-//! `saves-copies/`, `saves-links/`). No choices: folders are fixed.
+//! `saves-copies/`). No choices: folders are fixed.
 
 use std::path::{Path, PathBuf};
 
