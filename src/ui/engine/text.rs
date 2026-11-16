@@ -10,8 +10,10 @@
 //!   grid. Its faint anti-aliasing is thresholded to fully on/off pixels.
 //! * Smooth (Barlow): anti-aliased; medium weight for body
 //!   text, semibold for headings.
+//! * A theme's font file: anti-aliased, one weight, at the theme's size.
 
 use std::cell::OnceCell;
+use std::path::PathBuf;
 
 use macroquad::miniquad::{BlendFactor, BlendState, BlendValue, Equation};
 use macroquad::prelude::*;
@@ -48,10 +50,16 @@ void main() {
     gl_FragColor = vec4(color.rgb * texel.rgb, color.a);
 }"#;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum Typeface {
     Pixel,
     Barlow,
+    /// A TrueType/OpenType file from a theme folder; `size` is its body
+    /// text size in design pixels.
+    File {
+        path: PathBuf,
+        size: f32,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -74,7 +82,10 @@ pub struct Fonts {
 }
 
 impl Fonts {
-    pub fn load(typeface: Typeface) -> Fonts {
+    /// A font file that can't be read falls back to Barlow (with a warning),
+    /// still marked as the theme's typeface: it isn't read again until the
+    /// theme folders are (`Ui::reload_fonts`).
+    pub fn load(typeface: &Typeface) -> Fonts {
         let (body, heading) = match typeface {
             Typeface::Pixel => {
                 let mut font = load(include_bytes!("../../../assets/VT323-Regular.ttf"));
@@ -85,16 +96,25 @@ impl Fonts {
                 load(include_bytes!("../../../assets/Barlow-Medium.ttf")),
                 load(include_bytes!("../../../assets/Barlow-SemiBold.ttf")),
             ),
+            Typeface::File { path, .. } => match read_font(path) {
+                Some(font) => (font.clone(), font),
+                None => {
+                    return Fonts {
+                        typeface: typeface.clone(),
+                        ..Fonts::load(&Typeface::Barlow)
+                    }
+                }
+            },
         };
         Fonts {
-            typeface,
+            typeface: typeface.clone(),
             body,
             heading,
         }
     }
 
-    pub fn typeface(&self) -> Typeface {
-        self.typeface
+    pub fn typeface(&self) -> &Typeface {
+        &self.typeface
     }
 
     fn font(&self, size: Size) -> &Font {
@@ -110,6 +130,7 @@ impl Fonts {
         let body = match self.typeface {
             Typeface::Pixel => 25.0,
             Typeface::Barlow => 18.0,
+            Typeface::File { size, .. } => size,
         };
         match size {
             Size::Small => body * 0.8,
@@ -135,6 +156,14 @@ impl Fonts {
 
 fn load(bytes: &[u8]) -> Font {
     load_ttf_font_from_bytes(bytes).expect("embedded font failed to load")
+}
+
+fn read_font(path: &std::path::Path) -> Option<Font> {
+    let font = std::fs::read(path)
+        .map_err(|e| e.to_string())
+        .and_then(|bytes| load_ttf_font_from_bytes(&bytes).map_err(|e| e.to_string()));
+    font.map_err(|e| log::warn!("Theme font {}: {e}", path.display()))
+        .ok()
 }
 
 thread_local! {

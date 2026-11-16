@@ -23,9 +23,11 @@ mod saves;
 mod settings;
 mod setup;
 mod style;
+mod themes;
 mod updates;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use macroquad::prelude::*;
 
@@ -34,7 +36,7 @@ use crate::core::config::Config;
 use crate::core::init;
 use engine::canvas::{Canvas, Layout};
 use engine::input::{Action, Input};
-use engine::text::{self, Fonts, Size};
+use engine::text::{self, Fonts, Size, Typeface};
 use engine::theme::{self, Theme};
 
 /// Share of a tall screen's content height given to the panel below.
@@ -132,10 +134,17 @@ impl Ui {
     }
 
     /// Dress every screen in `theme` (loading its fonts if they differ).
-    pub fn set_theme(&mut self, theme: &'static Theme) {
+    pub fn set_theme(&mut self, theme: Arc<Theme>) {
+        if *self.fonts.typeface() != theme.typeface {
+            self.fonts = Fonts::load(&theme.typeface);
+        }
         theme::set(theme);
-        if self.fonts.typeface() != theme.typeface {
-            self.fonts = Fonts::load(theme.typeface);
+    }
+
+    /// Read the current font file again (it may have been edited or replaced).
+    pub fn reload_fonts(&mut self) {
+        if matches!(self.fonts.typeface(), Typeface::File { .. }) {
+            self.fonts = Fonts::load(&self.fonts.typeface().clone());
         }
     }
 

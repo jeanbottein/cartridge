@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use macroquad::prelude::*;
 
 use super::app_update::{self, AppUpdate};
-use super::engine::theme::{self, Tone, THEMES};
+use super::engine::theme::{self, Tone};
 use super::form::{Event as FormEvent, Field, Form};
 use super::{Hint, Ui};
 use crate::core::app::debug_mode;
@@ -85,9 +85,9 @@ const SCHEMA: [(&str, &[Setting]); 5] = [
 ];
 
 fn theme_options() -> Vec<(String, String)> {
-    THEMES
+    theme::all()
         .iter()
-        .map(|t| (t.id.to_string(), t.name.to_string()))
+        .map(|t| (t.id.clone(), t.name.clone()))
         .collect()
 }
 
@@ -126,8 +126,8 @@ fn fields(cfg: &Config) -> Vec<Field> {
                         Field::choice_labelled(s.key, label, v, steam_user_options())
                     }
                     Kind::Theme => {
-                        let v = theme::find(Some(v)).id;
-                        Field::choice_labelled(s.key, label, v, theme_options())
+                        let v = theme::find(Some(v)).id.clone();
+                        Field::choice_labelled(s.key, label, &v, theme_options())
                     }
                 };
                 field
