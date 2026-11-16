@@ -1,0 +1,31 @@
+{
+    "font": "Chewy-Regular.ttf",
+    "font_size": 19,
+    "radius": 3,
+    "glow": false,
+    "focus_width": 3,
+    "card_outline": true,
+    "colors": {
+        "bg_top": "#000000",
+        "bg_bottom": "#000000",
+        "surface": "#121212",
+        "surface_hi": "#262626",
+        "border": "#3c3c3c",
+        "shadow": "#000000b0",
+        "text": "#ffffff",
+        "muted": "#c4c4c4",
+        "disabled": "#5c5c5c",
+        "accent": "#ffd400",
+        "secondary": "#ff7a00",
+        "info": "#2ab7ff",
+        "danger": "#ff3d3d"
+    },
+    "tabs": {
+        "library": "#ffd400",
+        "mods": "#ff4fa3",
+        "saves": "#3ddc84",
+        "updates": "#2ab7ff",
+        "network": "#ff7a00",
+        "settings": "#b388ff"
+    }
+}

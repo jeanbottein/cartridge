@@ -4,6 +4,8 @@
 
 One self-contained, controller-friendly binary to carry DRM-free portable games, patches and save backups around. Steam / SteamOS friendly.
 
+![•cartridge on a Steam Deck-sized screen: library, saves, updates and settings](docs/demo.gif)
+
 ---
 
 Every game carries a `.cartridge/` folder with its metadata and artwork, and a folder holding the app, its `system/` settings and your games *is* a cartridge: portable, easy to back up, and named however you like. Call the folder `Potato-games` and that's its label, in the app and in Steam. The app can be renamed too; only the folders inside the cartridge keep fixed names:
@@ -34,6 +36,7 @@ Potato-games/          # any name: the cartridge's label
 - **Save backup** — the SAVES tab shows each game's saves on this machine and in its backup, with the date and time of each; back them up or restore them by hand, like two memory cards
 - **LAN sharing** — packs games into `.cartridge.tar` and copies them between cartridges on the local network; `--serve` runs a headless library machine
 - **Retro UI** — browse and launch games, edit every game (targets, save paths, artwork), and change every setting — with a gamepad (on-screen keyboard included), keyboard or mouse
+- **Themes** — Midnight and Retro built in, plus folders in `system/themes/`: a `theme.json` (colors, font, corners, a color per tab) and an optional font file. Saturday Morning ships there as a theme to copy
 
 Metadata and artwork are stored in a `.cartridge/` subfolder inside each game's directory — no central database, no magic, just files.
 

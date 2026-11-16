@@ -25,7 +25,7 @@ use super::saves::SavesScreen;
 use super::settings::Settings;
 use super::setup::{self, Setup};
 use super::updates::{self, UpdatesScreen};
-use super::{style, wants_fullscreen, Hint, Ui};
+use super::{style, themes, wants_fullscreen, Hint, Ui};
 use crate::core::app::{debug_mode, exe_dir, find_system_dir};
 use crate::core::autopilot::Autopilot;
 use crate::core::config::{self, Config};
@@ -94,6 +94,18 @@ const TAB_KEYS: [KeyCode; 6] = [
 ];
 
 impl Tab {
+    /// The tab's key in a theme's `tabs`.
+    fn id(self) -> &'static str {
+        match self {
+            Tab::Library => "library",
+            Tab::Mods => "mods",
+            Tab::Saves => "saves",
+            Tab::Updates => "updates",
+            Tab::Network => "network",
+            Tab::Settings => "settings",
+        }
+    }
+
     fn index(self) -> usize {
         TABS.iter().position(|(t, ..)| *t == self).unwrap_or(0)
     }
@@ -146,7 +158,7 @@ impl App {
         let (tx, logs) = channel();
         logging::attach(tx);
         let mut app = App {
-            ui: Ui::new(Fonts::load(theme::current().typeface)),
+            ui: Ui::new(Fonts::load(&theme::current().typeface)),
             config: None,
             setup: None,
             tab: Tab::Library,
@@ -189,6 +201,8 @@ impl App {
             migrations::run_all(&dir);
         }
         self.autopilot = Some(Autopilot::start(cfg.clone()));
+        themes::seed(&cfg.system_dir());
+        theme::install(themes::load(&cfg.system_dir()));
         self.config = Some(cfg);
         // The theme first: screens built below keep some of its colors.
         self.apply_theme();
@@ -203,6 +217,18 @@ impl App {
     fn apply_theme(&mut self) {
         let Some(cfg) = &self.config else { return };
         self.ui.set_theme(theme::find(cfg.get("THEME")));
+    }
+
+    /// Read the theme folders again (on opening SETTINGS): new ones join the
+    /// choice, and edits to the current one show.
+    fn reload_themes(&mut self) {
+        let Some(cfg) = &self.config else { return };
+        theme::install(themes::load(&cfg.system_dir()));
+        if let Some(settings) = &mut self.settings {
+            settings.refresh(cfg);
+        }
+        self.ui.reload_fonts();
+        self.apply_theme();
     }
 
     /// Borderless fullscreen or a window, as `WINDOW_MODE` says (when it changes).
@@ -375,6 +401,7 @@ impl App {
             }
             self.update_screen();
         }
+        theme::set_tab(self.tab.id());
         self.draw();
     }
 
@@ -471,6 +498,9 @@ impl App {
         self.switch_tabs();
         if self.tab == Tab::Saves && before != Tab::Saves {
             self.saves.forget(); // a game may have saved since
+        }
+        if self.tab == Tab::Settings && before != Tab::Settings {
+            self.reload_themes();
         }
     }
 
@@ -846,16 +876,17 @@ impl App {
         let tabs_end = match &self.setup {
             Some(_) => self.draw_tab(MARGIN, "SETUP", None, true),
             None => TABS.iter().fold(MARGIN, |x, (tab, name, icon)| {
-                self.draw_tab(x, name, Some(*icon), *tab == self.tab)
+                let idle = theme::tab_color(tab.id()).unwrap_or_else(theme::muted);
+                self.draw_tab(x, name, Some((*icon, idle)), *tab == self.tab)
             }),
         };
         self.draw_indicators(tabs_end, w);
         draw_rectangle(0.0, HEADER_H, w, 1.0, theme::border());
     }
 
-    /// One tab at `x`: its icon, plus its name in a pill when current.
-    /// Returns where the next tab starts.
-    fn draw_tab(&self, x: f32, name: &str, icon: Option<Icon>, active: bool) -> f32 {
+    /// One tab at `x`: its icon (in its idle color while not current), plus
+    /// its name in a pill when current. Returns where the next tab starts.
+    fn draw_tab(&self, x: f32, name: &str, icon: Option<(Icon, Color)>, active: bool) -> f32 {
         let icon_w = icon.map_or(0.0, |_| icon::SIZE);
         let name_w = match (active, icon) {
             (false, _) => 0.0,
@@ -863,17 +894,16 @@ impl App {
             (true, Some(_)) => ICON_GAP + self.ui.measure(name),
         };
         let width = icon_w + name_w;
-        let color = if active {
-            theme::accent()
-        } else {
-            theme::muted()
+        let color = match icon {
+            Some((_, idle)) if !active => idle,
+            _ => theme::accent(),
         };
         if active {
             let pill = Rect::new(x - TAB_PAD, 7.0, width + 2.0 * TAB_PAD, 22.0);
             fill_rounded(pill, theme::current().radius, fade(theme::accent(), 0.16));
             draw_rectangle(pill.x, pill.bottom() - 2.0, pill.w, 2.0, theme::accent());
         }
-        if let Some(icon) = icon {
+        if let Some((icon, _)) = icon {
             icon::draw(icon, x, 10.0, color);
             if icon == Icon::Updates && self.updates.has_available(&self.library.games) {
                 icon::dot(x, 10.0, theme::accent());
