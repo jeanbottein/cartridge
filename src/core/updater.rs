@@ -366,7 +366,22 @@ fn extract(kind: Archive, archive: &Path, dest: &Path) -> Result<(), String> {
     match kind {
         Archive::TarGz => extract_tar_gz(file, dest).map_err(|e| e.to_string()),
         Archive::Zip => extract_zip(file, dest).map_err(|e| e.to_string()),
-    }
+    }?;
+    remove_apple_double(dest).map_err(|e| e.to_string())
+}
+
+/// macOS archivers keep file attributes as `._name` files: junk anywhere
+/// else, and inside an `.app` they break its signature.
+fn remove_apple_double(root: &Path) -> io::Result<()> {
+    package::walk(root)?
+        .into_iter()
+        .filter(|item| matches!(item.kind, Kind::File(_)))
+        .filter(|item| {
+            item.rel
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("._"))
+        })
+        .try_for_each(|item| fs::remove_file(root.join(&item.rel)))
 }
 
 /// Links go through `Links`: copies where the filesystem has none.
@@ -1195,6 +1210,27 @@ mod tests {
         assert_eq!(fs::read(dest.join("bin/run")).unwrap(), b"bin");
         assert!(paths::is_symlink(&dest.join("bin/run")));
         assert!(fs::symlink_metadata(dest.join("key")).is_err());
+    }
+
+    #[test]
+    fn macos_attribute_files_are_left_out_of_an_archive() {
+        let dir = TempDir::new();
+        let mut zip = zip::ZipWriter::new(io::Cursor::new(Vec::new()));
+        for name in [
+            "Cartridge.app/Contents/MacOS/cartridge",
+            "Cartridge.app/Contents/._MacOS",
+        ] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(b"x").unwrap();
+        }
+        let archive = dir.write("a.zip", &zip.finish().unwrap().into_inner());
+        let dest = dir.mkdir("out");
+        extract(Archive::Zip, &archive, &dest).unwrap();
+        assert!(dest
+            .join("Cartridge.app/Contents/MacOS/cartridge")
+            .is_file());
+        assert!(!dest.join("Cartridge.app/Contents/._MacOS").exists());
     }
 
     #[test]

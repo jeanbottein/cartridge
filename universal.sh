@@ -29,7 +29,8 @@ for archive in linux-x86_64 linux-aarch64; do
     tar -xzf "$IN/cartridge-$archive.tar.gz" -C "$WORK/$archive"
 done
 for archive in macos-arm64 windows-x86_64; do
-    unzip -q "$IN/cartridge-$archive.zip" -d "$WORK/$archive"
+    # unzip exits with 1 on mere warnings (e.g. a zip written on Windows).
+    unzip -q "$IN/cartridge-$archive.zip" -d "$WORK/$archive" || [ $? -eq 1 ]
 done
 # ditto stores extended attributes as ._ files: in the .app they would
 # break its signature.

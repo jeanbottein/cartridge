@@ -185,11 +185,12 @@ fn swap(new: &Path, target: &Path) -> Result<(), String> {
 /// removed; the others go at once.
 fn swap_universal(root: &Path, target: &Path) -> Result<(), String> {
     let new = find_app(root, universal_name())?;
-    swap(&new, target)?;
     let (from, here) = (
         new.parent().unwrap_or(root),
         target.parent().unwrap_or(root),
     );
+    // The running app last: if another one fails, it is still the old
+    // version, as the error says.
     app::UNIVERSAL_APPS
         .iter()
         .chain([&app::LAUNCHER])
@@ -199,8 +200,9 @@ fn swap_universal(root: &Path, target: &Path) -> Result<(), String> {
         .try_for_each(|(new, old)| {
             swap(&new, &old)?;
             remove_previous(&old);
-            Ok(())
-        })
+            Ok::<(), String>(())
+        })?;
+    swap(&new, target)
 }
 
 /// Download `asset` and put the app it holds in place of `target`.
