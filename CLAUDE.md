@@ -49,7 +49,7 @@ src/
     save_links.rs        # optional saves-links/ symlink tree (not built for now; silent where links fail, folder only with a link)
     proton.rs            # Windows games with Steam's Proton + runtime, in the shortcut's compatdata prefix; winetricks
     patcher.rs mods.rs   # mod file engine (state/apply/restore) + mod model (list, on/off)
-    self_update.rs       # the app's own update: release of CARTRIDGE_REPO (baked in by CI), only the app swapped (old one moved aside, removed at next launch)
+    self_update.rs       # the app's own update: release of CARTRIDGE_REPO (baked in by CI), only the app swapped (old one moved aside, removed at next launch); universal cartridge: all its apps
     updater.rs           # game.json "update": latest GitHub release, asset pick by os/arch, download + upsert over the game folder (never deletes, never writes .cartridge/) or AppImage over the executable
     pipeline.rs init.rs logging.rs
     autopilot.rs         # Worker + Watcher: lists games/ every 2 s (served from the kernel cache), waits for new entries to stop changing
@@ -116,7 +116,11 @@ Releases (`v*` tags, or run the Release workflow by hand) ship ready-to-use
 cartridge archives (`package.sh`, template in `packaging/cartridge/`): a
 `Cartridge/` folder with the app (`Cartridge.AppImage` via `appimage.sh`,
 Apple Silicon `Cartridge.app` via `macapp.sh`, `cartridge.exe`), READMEs and an
-empty `system/`. No `config.txt` is shipped: the app creates it on first
+empty `system/`. `universal.sh` merges the four into `cartridge-universal.zip`:
+every app side by side (`core::app::UNIVERSAL_APPS`, the Linux ones named by
+arch) plus `packaging/start.sh` (picks the app by `uname`, AppImage
+extract-and-run without FUSE); self-update in a folder holding several of
+them takes that archive and swaps them all. No `config.txt` is shipped: the app creates it on first
 launch, so extracting a newer release over a cartridge keeps its settings.
 CI extracts each archive and runs the app inside it. Bare binaries are only
 published with `PUBLISH_BARE_BINARIES: true` in `release.yml`. In an AppImage

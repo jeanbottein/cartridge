@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use log::{error, info};
 
 use super::app::{
-    is_translocated, is_workspace, launched_file, DISPLAY_NAME, FOLDERS, SAVES_LINKS_DIR,
-    WORKSPACE_DIR, WORKSPACE_README,
+    is_translocated, is_workspace, launched_file, DISPLAY_NAME, FOLDERS, LAUNCHER, SAVES_LINKS_DIR,
+    UNIVERSAL_APPS, WORKSPACE_DIR, WORKSPACE_README,
 };
 use super::config::DEFAULT_CONFIG;
 use super::paths;
@@ -64,10 +64,17 @@ pub fn config_in(system_dir: &Path) -> PathBuf {
 }
 
 /// Entries a cartridge holds besides the app and its `FOLDERS`.
-const CARTRIDGE_FILES: [&str; 4] = [WORKSPACE_DIR, SAVES_LINKS_DIR, "README.txt", ".DS_Store"];
+const CARTRIDGE_FILES: [&str; 6] = [
+    WORKSPACE_DIR,
+    SAVES_LINKS_DIR,
+    LAUNCHER,
+    "README.txt",
+    "LICENSE.txt",
+    ".DS_Store",
+];
 
 fn is_cartridge_entry(name: &str) -> bool {
-    FOLDERS.contains(&name) || CARTRIDGE_FILES.contains(&name)
+    FOLDERS.contains(&name) || CARTRIDGE_FILES.contains(&name) || UNIVERSAL_APPS.contains(&name)
 }
 
 /// How many entries of `dir` are neither the app nor part of a cartridge.
@@ -234,6 +241,14 @@ mod tests {
         assert!(config.is_file());
         assert!(dir.path().join("games").is_dir());
         assert!(!dir.path().join("saves-links").exists());
+    }
+
+    #[test]
+    fn the_other_apps_of_a_universal_cartridge_are_part_of_it() {
+        let names: Vec<String> = ["Cartridge.app", "Cartridge-arm64.AppImage", "start.sh"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(unrelated_entries(&names, Some("cartridge.exe")), 0);
     }
 
     #[test]
