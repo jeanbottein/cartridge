@@ -4,6 +4,8 @@
 
 One self-contained, controller-friendly binary to carry DRM-free portable games, patches and save backups around. Steam / SteamOS friendly.
 
+![•cartridge on a Steam Deck-sized screen: library, saves, updates and settings](docs/demo.gif)
+
 ---
 
 Every game carries a `.cartridge/` folder with its metadata and artwork, and a folder holding the app, its `system/` settings and your games *is* a cartridge: portable, easy to back up, and named however you like. Call the folder `Potato-games` and that's its label, in the app and in Steam. The app can be renamed too; only the folders inside the cartridge keep fixed names:
