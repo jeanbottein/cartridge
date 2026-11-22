@@ -52,8 +52,10 @@ FIRST LAUNCH, PER SYSTEM
 
   macOS: the app isn't notarized by Apple. Move the •cartridge folder where
   you want it with Finder first, then right-click Cartridge.app > Open. If it
-  says it runs from a temporary copy, run once in Terminal:
-      xattr -dr com.apple.quarantine /path/to/•cartridge
+  says it runs from a temporary copy (it can't write its folder): quit, drag
+  Cartridge.app out of this folder and back in with Finder, then open it
+  again. In Desktop, Documents or Downloads, allow it in System Settings >
+  Privacy & Security > Files and Folders, or keep •cartridge elsewhere.
 
   Windows: SmartScreen may warn about an unknown app: More info > Run anyway.
 

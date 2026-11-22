@@ -128,7 +128,7 @@ pub fn target() -> Result<PathBuf, String> {
     let file = app::launched_file().ok_or("Cannot tell where this app is")?;
     if app::is_translocated(&file) {
         return Err(format!(
-            "macOS runs {DISPLAY_NAME} from a hidden copy: move it out of Downloads first"
+            "macOS runs {DISPLAY_NAME} from a hidden copy: in Finder, drag it out of its folder and back, then reopen it"
         ));
     }
     Ok(file)

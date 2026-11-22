@@ -78,7 +78,7 @@ On Linux, Windows games start from the app with the Proton builds Steam installe
 2. Extract it where you want your cartridge. You get a ready-made `Cartridge/` folder (rename it: that's its label) holding the app (`Cartridge.AppImage`, `Cartridge.app` or `cartridge.exe`), an empty `system/`, `games/`, `mods/` and `saves-copies/`. Keep the app inside that folder: it looks for `system/` right next to itself. To put a folder elsewhere, replace it with a symbolic link.
 3. Launch the app (first launch creates `system/config.txt`). If it won't start:
    - **Linux / Steam Deck:** make the AppImage executable (`chmod +x Cartridge.AppImage`), and don't let an AppImage manager (Gear Lever, AppImageLauncher) move it out of the folder.
-   - **macOS:** the app isn't notarized. Right-click `Cartridge.app` > Open; if it says it runs from a temporary copy, run `xattr -dr com.apple.quarantine /path/to/Cartridge` once.
+   - **macOS:** the app isn't notarized. Right-click `Cartridge.app` > Open; if it says it runs from a temporary copy (it can't write its folder), quit, drag `Cartridge.app` out of its folder and back in with Finder, then open it again. In Desktop, Documents or Downloads, allow it in System Settings > Privacy & Security > Files and Folders, or keep the cartridge elsewhere.
    - **Windows:** on the SmartScreen warning, More info > Run anyway.
 4. Drop your games into `games/` (each in its own folder): they show up in the Library by themselves. Adjust the settings in the UI, or in `system/config.txt`.
 
