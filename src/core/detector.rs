@@ -9,19 +9,20 @@ use log::{info, warn};
 
 use super::models::{Game, SavePath, Target};
 use super::paths;
-use super::platform::{
-    arch_tag, detect_binary_arch, has_exec_permission, is_executable, is_native_binary,
-    make_executable, os_tag,
-};
+use super::platform::{has_exec_permission, inspect, make_executable, needs_exec_bit, Program};
 use super::scanner;
 use super::{steam, unique};
 
 const SKIP_DIRS: [&str; 4] = ["java", "jre", "lib", "__pycache__"];
 const MAX_DEPTH: usize = 3;
-/// Native programs found even without their execute bit (copies over FAT
-/// drives, zips or web downloads drop it). No extension counts too; libraries
-/// (`.so`, `.so.6`, `.dylib`) never match.
-const PROGRAM_EXTENSIONS: [&str; 6] = ["appimage", "x86_64", "x86", "x64", "bin", "run"];
+/// Native programs and scripts found even without their execute bit (copies
+/// over FAT drives, zips or web downloads drop it). No extension counts too;
+/// libraries (`.so`, `.so.6`, `.dylib`) never match.
+const PROGRAM_EXTENSIONS: [&str; 7] = ["appimage", "x86_64", "x86", "x64", "bin", "run", "sh"];
+const MACOS_WORDS: [&str; 5] = ["mac", "macos", "macosx", "osx", "darwin"];
+const ARM64_WORDS: [&str; 2] = ["arm64", "aarch64"];
+/// 32-bit x86 counts as x64, as for `platform::arch_tag`.
+const X64_WORDS: [&str; 5] = ["x64", "amd64", "x86", "i386", "i686"];
 
 // ── Similarity (difflib.SequenceMatcher.ratio) ───────────────────────────
 
@@ -123,7 +124,8 @@ fn find_best(game_dir: &Path, files: &[PathBuf]) -> Option<PathBuf> {
 }
 
 /// Files of `dir` and its subfolders up to `max_depth` levels (1 = `dir` only),
-/// skipping hidden and runtime folders, never following folder symlinks.
+/// skipping hidden and runtime folders, never following folder symlinks. A
+/// macOS `.app` bundle counts as a file: it is the program.
 fn walk_files(dir: &Path, max_depth: usize) -> Vec<PathBuf> {
     if max_depth == 0 {
         return Vec::new();
@@ -131,7 +133,7 @@ fn walk_files(dir: &Path, max_depth: usize) -> Vec<PathBuf> {
     let (dirs, files): (Vec<PathBuf>, Vec<PathBuf>) = paths::sorted_entries(dir)
         .into_iter()
         .map(|n| dir.join(n))
-        .partition(|p| p.is_dir());
+        .partition(|p| p.is_dir() && !is_app_bundle(p));
     let nested = dirs
         .into_iter()
         .filter(|d| {
@@ -140,6 +142,34 @@ fn walk_files(dir: &Path, max_depth: usize) -> Vec<PathBuf> {
         })
         .flat_map(|d| walk_files(&d, max_depth - 1));
     files.into_iter().chain(nested).collect()
+}
+
+fn is_app_bundle(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("app"))
+        && path.is_dir()
+}
+
+/// A bundle's program: in `Contents/MacOS/`, the one named like the bundle,
+/// else the first there.
+fn bundle_binary(bundle: &Path) -> Option<PathBuf> {
+    let macos = bundle.join("Contents").join("MacOS");
+    let named = macos.join(bundle.file_stem()?);
+    if named.is_file() {
+        return Some(named);
+    }
+    paths::sorted_entries(&macos)
+        .into_iter()
+        .map(|n| macos.join(n))
+        .find(|p| p.is_file())
+}
+
+fn bundle_program(bundle: &Path) -> Program {
+    let arch = match bundle_binary(bundle).and_then(|b| inspect(&b)) {
+        Some(Program::Binary { arch, .. }) => arch,
+        _ => None,
+    };
+    Program::Binary { os: "macos", arch }
 }
 
 fn is_exe_name(path: &Path) -> bool {
@@ -152,14 +182,19 @@ fn has_program_name(path: &Path) -> bool {
     })
 }
 
-/// A file worth offering as a target: a Windows `.exe`, or a native program
-/// (with its execute bit, or named like one).
-fn is_candidate(path: &Path) -> bool {
-    (is_exe_name(path) || has_exec_permission(path) || has_program_name(path))
-        && is_executable(path)
+/// The program `path` is, when worth offering as a target: a `.app` bundle,
+/// a Windows `.exe`, or a native program or `#!` script (with its execute
+/// bit, or named like one). Names first: only those files are opened.
+fn program_of(path: &Path) -> Option<Program> {
+    if is_app_bundle(path) {
+        return Some(bundle_program(path));
+    }
+    let named_like_one = is_exe_name(path) || has_exec_permission(path) || has_program_name(path);
+    named_like_one.then(|| inspect(path)).flatten()
 }
 
-/// Descend through folders that only contain a single subfolder.
+/// Descend through folders that only contain a single subfolder (never into
+/// a `.app` bundle: that is the game's program).
 fn real_game_dir(game_dir: &Path) -> PathBuf {
     let mut dir = paths::normpath(game_dir);
     for _ in 0..=10 {
@@ -168,7 +203,7 @@ fn real_game_dir(game_dir: &Path) -> PathBuf {
             .filter(|n| !n.starts_with('.'))
             .map(|n| dir.join(n))
             .collect();
-        let only_one_dir = entries.len() == 1 && entries[0].is_dir();
+        let only_one_dir = entries.len() == 1 && entries[0].is_dir() && !is_app_bundle(&entries[0]);
         if !only_one_dir {
             break;
         }
@@ -182,20 +217,66 @@ pub fn title_for(game_dir: &Path) -> String {
     base_name(&real_game_dir(game_dir))
 }
 
-/// Arch from the binary header, else from name hints, else this machine's.
-fn arch_of(exe: &Path) -> String {
-    if let Some(arch) = detect_binary_arch(exe) {
-        return arch.to_string();
-    }
-    let name = base_name(exe).to_lowercase();
-    let arch = if name.contains("arm64") || name.contains("aarch64") {
-        "arm64"
-    } else if name.contains("x86_64") || name.contains("amd64") || name.contains("64") {
-        "x64"
+fn words(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| !c.is_ascii_alphanumeric())
+}
+
+/// OS named in a path (`game-linux64/run`, `game_osx/start.sh`), by whole
+/// words: "mac" inside "machinarium" says nothing.
+fn os_hint(text: &str) -> Option<&'static str> {
+    if words(text).any(|w| w.starts_with("linux")) {
+        Some("linux")
+    } else if words(text).any(|w| MACOS_WORDS.contains(&w)) {
+        Some("macos")
     } else {
-        arch_tag()
-    };
-    arch.to_string()
+        None
+    }
+}
+
+/// Arch named in a path (`game-amd64`, `Game.x86_64`), by whole words: the
+/// "x64" inside "box64" says nothing.
+fn arch_hint(text: &str) -> Option<&'static str> {
+    // One word for the split, which would cut it at its separator.
+    let text = text.replace("x86_64", "x64").replace("x86-64", "x64");
+    if words(&text).any(|w| ARM64_WORDS.contains(&w)) {
+        Some("arm64")
+    } else if words(&text).any(|w| X64_WORDS.contains(&w)) {
+        Some("x64")
+    } else {
+        None
+    }
+}
+
+/// `(os, arch)` of a target; an empty arch means any.
+type Platform = (String, String);
+
+/// Where a script runs: what its path names (`game-linux-amd64/start.sh`),
+/// else where the programs beside it run, else Linux on any arch: the scripts
+/// games ship are Linux launchers, and the answer must not depend on the
+/// machine that scans.
+fn script_platform(script: &Path, game_dir: &Path, beside: Option<&Platform>) -> Platform {
+    let path = format!(
+        "{}/{}",
+        base_name(game_dir),
+        paths::lossy(&paths::relpath(script, game_dir))
+    )
+    .to_lowercase();
+    let (beside_os, beside_arch) =
+        beside.map_or(("linux", ""), |(os, arch)| (os.as_str(), arch.as_str()));
+    let os = os_hint(&path).unwrap_or(beside_os);
+    let arch = arch_hint(&path).unwrap_or(beside_arch);
+    (os.to_string(), arch.to_string())
+}
+
+/// The one platform the native programs of a game run on, if they agree.
+fn native_platform(binaries: &[(Platform, PathBuf)]) -> Option<Platform> {
+    let natives: Vec<&Platform> = unique(
+        binaries
+            .iter()
+            .filter(|((os, _), _)| os != "windows")
+            .map(|(platform, _)| platform),
+    );
+    (natives.len() == 1).then(|| natives[0].clone())
 }
 
 fn make_target(os: &str, arch: &str, exe: &Path, game_dir: &Path) -> Target {
@@ -208,59 +289,40 @@ fn make_target(os: &str, arch: &str, exe: &Path, game_dir: &Path) -> Target {
     }
 }
 
-/// Windows host: the best-named `.exe` among those built for this machine's
-/// arch, else for the other one. By header, not name: a "64" in a helper
-/// such as `UnityCrashHandler64.exe` says nothing about the game.
-fn best_windows_exe(dir: &Path, depth: usize) -> Option<PathBuf> {
-    let candidates: Vec<(PathBuf, String)> = walk_files(dir, depth)
+/// Every target detected in `game_dir`, one per (os, arch), the best-named of
+/// each: the same on every machine, which picks its own at launch. Arch comes
+/// from headers, not names: a "64" in a helper such as
+/// `UnityCrashHandler64.exe` says nothing about the game.
+pub fn collect_targets(game_dir: &Path) -> Vec<Target> {
+    let real_dir = real_game_dir(game_dir);
+    let found: Vec<(PathBuf, Program)> = walk_files(&real_dir, MAX_DEPTH)
         .into_iter()
-        .filter(|p| is_exe_name(p))
-        .map(|p| {
-            let arch = arch_of(&p);
-            (p, arch)
+        .filter_map(|p| program_of(&p).map(|program| (p, program)))
+        .collect();
+    let binaries: Vec<(Platform, PathBuf)> = found
+        .iter()
+        .filter_map(|(path, program)| match program {
+            Program::Binary { os, arch } => Some((
+                (os.to_string(), arch.unwrap_or_default().to_string()),
+                path.clone(),
+            )),
+            Program::Script => None,
         })
         .collect();
-    let arch_order = match arch_tag() {
-        "arm64" => ["arm64", "x64"],
-        _ => ["x64", "arm64"],
-    };
-    let built_for = |arch: &str| -> Vec<PathBuf> {
-        candidates
-            .iter()
-            .filter(|(_, a)| a == arch)
-            .map(|(p, _)| p.clone())
-            .collect()
-    };
-    let any: Vec<PathBuf> = candidates.iter().map(|(p, _)| p.clone()).collect();
-    arch_order
+    let beside = native_platform(&binaries);
+    let scripts = found
         .iter()
-        .find_map(|arch| find_best(dir, &built_for(arch)))
-        .or_else(|| find_best(dir, &any))
-}
+        .filter(|(_, program)| *program == Program::Script)
+        .map(|(path, _)| {
+            (
+                script_platform(path, game_dir, beside.as_ref()),
+                path.clone(),
+            )
+        });
 
-fn collect_windows_host_targets(game_dir: &Path) -> Vec<Target> {
-    let real_dir = real_game_dir(game_dir);
-    (1..=MAX_DEPTH)
-        .find_map(|depth| best_windows_exe(&real_dir, depth))
-        .map(|exe| vec![make_target("windows", &arch_of(&exe), &exe, game_dir)])
-        .unwrap_or_default()
-}
-
-/// One target per (os, arch): native executables and Windows `.exe` files.
-fn collect_posix_host_targets(game_dir: &Path) -> Vec<Target> {
-    let real_dir = real_game_dir(game_dir);
-    let exes = walk_files(&real_dir, MAX_DEPTH)
-        .into_iter()
-        .filter(|p| is_candidate(p));
-
-    let mut groups: Vec<((String, String), Vec<PathBuf>)> = Vec::new();
-    for exe in exes {
-        let os = if is_exe_name(&exe) {
-            "windows"
-        } else {
-            os_tag()
-        };
-        let key = (os.to_string(), arch_of(&exe));
+    // A loop: groups keep the order programs were found in.
+    let mut groups: Vec<(Platform, Vec<PathBuf>)> = Vec::new();
+    for (key, exe) in binaries.into_iter().chain(scripts) {
         match groups.iter_mut().find(|(k, _)| *k == key) {
             Some((_, list)) => list.push(exe),
             None => groups.push((key, vec![exe])),
@@ -272,15 +334,6 @@ fn collect_posix_host_targets(game_dir: &Path) -> Vec<Target> {
             find_best(&real_dir, exes).map(|best| make_target(os, arch, &best, game_dir))
         })
         .collect()
-}
-
-/// Every executable target detected in `game_dir`.
-pub fn collect_targets(game_dir: &Path) -> Vec<Target> {
-    if os_tag() == "windows" {
-        collect_windows_host_targets(game_dir)
-    } else {
-        collect_posix_host_targets(game_dir)
-    }
 }
 
 /// Fill targets + title for every game that has no targets yet, and give
@@ -314,9 +367,9 @@ fn restore_exec_bits(game: &Game) {
         .for_each(|t| restore_exec_bit(&scanner::resolve_target(&game.dir, t).target));
 }
 
-/// Make a native program executable again if it lost the bit (logged).
+/// Make a native program or script executable again if it lost the bit (logged).
 pub fn restore_exec_bit(exe: &Path) {
-    if has_exec_permission(exe) || !is_native_binary(exe) {
+    if has_exec_permission(exe) || !needs_exec_bit(exe) {
         return;
     }
     match make_executable(exe) {
@@ -521,7 +574,7 @@ mod tests {
 
         let targets = collect_targets(&game);
         assert_eq!(title_for(&game), "Celeste");
-        let native = targets.iter().find(|t| t.os == os_tag()).unwrap();
+        let native = targets.iter().find(|t| t.os == "linux").unwrap();
         assert_eq!(native.arch, "x64");
         assert_eq!(native.target, "wrapper/Celeste.bin.x86_64");
         assert_eq!(native.start_in, "wrapper");
@@ -546,39 +599,52 @@ mod tests {
         dir.write("Hollow Knight/hollow_knight.exe", &pe(0x8664));
         dir.write("Hollow Knight/UnityCrashHandler64.exe", &pe(0x8664));
 
-        let best = best_windows_exe(&game, 1).unwrap();
-        assert_eq!(best.file_name().unwrap(), "hollow_knight.exe");
+        let targets = collect_targets(&game);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].target, "hollow_knight.exe");
     }
 
     #[test]
-    fn windows_host_prefers_an_exe_built_for_its_arch() {
+    fn each_arch_a_game_is_built_for_gets_its_own_target() {
         let dir = TempDir::new();
         let game = dir.mkdir("Game");
         dir.write("Game/Game.exe", &pe(0xAA64));
         dir.write("Game/Game-x64.exe", &pe(0x8664));
-        let wanted = if arch_tag() == "arm64" {
-            "Game.exe"
-        } else {
-            "Game-x64.exe"
-        };
 
-        let best = best_windows_exe(&game, 1).unwrap();
-        assert_eq!(best.file_name().unwrap(), wanted);
+        let targets: Vec<(String, String)> = collect_targets(&game)
+            .into_iter()
+            .map(|t| (t.arch, t.target))
+            .collect();
+        assert!(targets.contains(&("arm64".into(), "Game.exe".into())));
+        assert!(targets.contains(&("x64".into(), "Game-x64.exe".into())));
+    }
+
+    /// A universal (x64 + arm64) Mach-O header.
+    fn universal_macho() -> Vec<u8> {
+        let mut bytes = 0xCAFE_BABEu32.to_be_bytes().to_vec();
+        bytes.extend(2u32.to_be_bytes());
+        for cpu in [0x0100_0007u32, 0x0100_000C] {
+            bytes.extend(cpu.to_be_bytes());
+            bytes.extend([0; 16]);
+        }
+        bytes
     }
 
     #[test]
-    fn a_windows_host_target_has_the_arch_its_exe_is_built_for() {
+    fn an_app_bundle_is_one_macos_target_and_no_folder_to_descend() {
         let dir = TempDir::new();
         let game = dir.mkdir("Game");
-        let (other_arch, machine) = if arch_tag() == "arm64" {
-            ("x64", 0x8664)
-        } else {
-            ("arm64", 0xAA64)
-        };
-        dir.write("Game/Game.exe", &pe(machine));
+        dir.write("Game/Game.app/Contents/MacOS/Game", &universal_macho());
+        dir.write("Game/Game.app/Contents/Info.plist", b"<plist/>");
 
-        let targets = collect_windows_host_targets(&game);
-        assert_eq!(targets[0].arch, other_arch);
+        let targets = collect_targets(&game);
+        assert_eq!(title_for(&game), "Game");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(
+            (targets[0].os.as_str(), targets[0].arch.as_str()),
+            ("macos", "")
+        );
+        assert_eq!(targets[0].target, "Game.app");
     }
 
     #[test]
@@ -648,13 +714,13 @@ mod tests {
     #[test]
     fn programs_that_lost_their_execute_bit_are_candidates_libraries_are_not() {
         let dir = TempDir::new();
-        let candidate = |name: &str| is_candidate(&write_644(&dir, name, &elf()));
+        let candidate = |name: &str| program_of(&write_644(&dir, name, &elf())).is_some();
         assert!(candidate("Strange Flesh.AppImage"));
         assert!(candidate("BanjoRecompiled"));
         assert!(candidate("Celeste.bin.x86_64"));
         assert!(!candidate("libgame.so"));
         assert!(!candidate("libgame.so.6"));
-        assert!(!is_candidate(&write_644(&dir, "notes", b"not a program")));
+        assert!(program_of(&write_644(&dir, "notes", b"not a program")).is_none());
     }
 
     #[cfg(unix)]
@@ -680,7 +746,7 @@ mod tests {
         let exe = write_644(&dir, "Game/game", &elf());
         let script = write_644(&dir, "Game/start.txt", b"echo hi");
         let target = |name: &str| Target {
-            os: os_tag().into(),
+            os: "linux".into(),
             target: name.into(),
             ..Default::default()
         };
@@ -692,6 +758,85 @@ mod tests {
         detect(&mut games);
         assert_eq!(mode(&exe), 0o755);
         assert_eq!(mode(&script), 0o644);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_launcher_script_takes_its_os_and_arch_from_the_folder_name() {
+        let dir = TempDir::new();
+        let game = dir.mkdir("lennas-inception-linux-amd64-stable");
+        make_exec(&dir.write(
+            "lennas-inception-linux-amd64-stable/lennasinception",
+            b"#!/bin/bash\nexec ./jre/bin/java -jar lib/libloader.jar",
+        ));
+        make_exec(&dir.write("lennas-inception-linux-amd64-stable/jre/bin/java", &elf()));
+
+        let targets = collect_targets(&game);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(
+            (targets[0].os.as_str(), targets[0].arch.as_str()),
+            ("linux", "x64")
+        );
+        assert_eq!(targets[0].target, "lennasinception");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_script_without_hints_runs_where_the_programs_beside_it_do() {
+        let dir = TempDir::new();
+        let game = dir.mkdir("Celeste");
+        make_exec(&dir.write("Celeste/Celeste", b"#!/bin/sh\n./Celeste.bin.x86_64"));
+        make_exec(&dir.write("Celeste/Celeste.bin.x86_64", &elf()));
+
+        let targets = collect_targets(&game);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].os, "linux");
+        assert_eq!(targets[0].target, "Celeste");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_script_alone_is_a_linux_launcher_for_any_arch() {
+        let dir = TempDir::new();
+        let game = dir.mkdir("Game");
+        make_exec(&dir.write("Game/start.sh", b"#!/bin/sh\necho hi"));
+
+        let targets = collect_targets(&game);
+        assert_eq!(
+            (targets[0].os.as_str(), targets[0].arch.as_str()),
+            ("linux", "")
+        );
+    }
+
+    #[test]
+    fn os_and_arch_hints_are_read_from_names() {
+        assert_eq!(os_hint("game-linux64/run"), Some("linux"));
+        assert_eq!(os_hint("game_osx/run.sh"), Some("macos"));
+        assert_eq!(os_hint("machinarium/run.sh"), None);
+        assert_eq!(arch_hint("game-amd64"), Some("x64"));
+        assert_eq!(arch_hint("game-aarch64"), Some("arm64"));
+        assert_eq!(arch_hint("celeste.bin.x86_64"), Some("x64"));
+        assert_eq!(arch_hint("game-2064"), None);
+        assert_eq!(arch_hint("box64-wrapper"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scripts_that_lost_their_execute_bit_are_candidates_when_named_like_programs() {
+        let dir = TempDir::new();
+        let candidate = |name: &str| program_of(&write_644(&dir, name, b"#!/bin/sh\n")).is_some();
+        assert!(candidate("start.sh"));
+        assert!(candidate("lennasinception"));
+        assert!(!candidate("notes.txt"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_script_target_gets_its_execute_bit_back() {
+        let dir = TempDir::new();
+        let script = write_644(&dir, "start.sh", b"#!/bin/sh\n");
+        restore_exec_bit(&script);
+        assert_eq!(mode(&script), 0o755);
     }
 
     #[test]

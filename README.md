@@ -25,7 +25,7 @@ Potato-games/          # any name: the cartridge's label
 
 - **Autonomous** — no button to press: at launch, and whenever a folder or a `.cartridge.tar` lands in (or leaves) `games/`, the app processes it once the copy is done
 - **Scan** — discovers game folders and loads existing metadata
-- **Detect** — auto-detects executables when metadata is missing
+- **Detect** — auto-detects executables when metadata is missing: native programs, `.exe` files, macOS `.app` bundles and launcher scripts (`#!`), one target per OS and arch, the same whichever machine scans (each picks its own at launch). OS and arch come from the file itself (ELF → Linux, Mach-O → macOS, universal → any arch); a script's from its path (`game-linux-amd64/`), else from the programs beside it, else Linux on any arch. The game editor's detect adds targets found later
 - **SteamGridDB integration, out of the box** — fetches official names and artwork from [SteamGridDB](https://www.steamgriddb.com/); release builds embed an API key, so there's nothing to set up (your own key in `config.txt` overrides it)
 - **Steam shortcuts** — adds games, or the cartridge itself, to Steam as non-Steam shortcuts, complete with artwork, and sets Proton for Windows games
 - **Proton support** — plays Windows games on Linux with Steam's own Proton, in the same prefix as their Steam shortcut

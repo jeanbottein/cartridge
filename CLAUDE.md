@@ -12,7 +12,7 @@ core::pipeline::Pipeline (one fixed sequence; each phase only does what is missi
                           steps 2-4 run per batch of 10 games, each batch written before the next)
  0. migrations::run_all      # Idempotent data migrations
  1. scanner::scan            # Parse .cartridge/game.json into Vec<Game>
- 2. detector::detect         # Fill missing targets (exe detection), restore lost exec bits
+ 2. detector::detect         # Fill missing targets (programs, .app, #! scripts; per os/arch, host-independent), restore lost exec bits
     sizer::measure           #   + size on disk into game.json (only when unknown: kept until reinstalled)
  3. sgdb::enrich             # SteamGridDB names/IDs/artwork (if API key)
  4. persister::persist       # Write game.json + download images, always in each game's .cartridge/
@@ -25,7 +25,7 @@ core::pipeline::Pipeline (one fixed sequence; each phase only does what is missi
  (updater.rs: game updates from GitHub releases, by hand from the UPDATES tab, never by the pipeline)
 ```
 
-Migrations: `launch_manifest.json` → `.cartridge/game.json`, nested → flat `savePaths`, arch `x86_64` → `x64`. Add new ones to `migrations::run_all`; keep them idempotent.
+Migrations: a bare `games/Foo.app` → `games/Foo/Foo.app` (never `.cartridge/` inside a bundle: it breaks the signature), `launch_manifest.json` → `.cartridge/game.json`, nested → flat `savePaths`, arch `x86_64` → `x64`. Add new ones to `migrations::run_all`; keep them idempotent.
 
 ## Architecture
 

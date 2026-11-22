@@ -49,6 +49,7 @@ fn macho_arch(cpu: u32) -> Option<&'static str> {
 
 const MACHO_MAGICS: [u32; 2] = [0xFEED_FACE, 0xFEED_FACF];
 const FAT_MAGIC: u32 = 0xCAFE_BABE;
+const MAX_FAT_ARCHES: usize = 20;
 
 fn u16_le(b: &[u8], at: usize) -> u16 {
     u16::from_le_bytes([b[at], b[at + 1]])
@@ -81,64 +82,81 @@ fn read_pe_arch(file: &mut File, header: &[u8]) -> Option<&'static str> {
     pe_arch(u16_le(&sig, 4))
 }
 
-fn read_macho_arch(header: &[u8]) -> Option<&'static str> {
+/// Arch of a Mach-O header: `Some(None)` for a universal binary built for
+/// several, `None` when not Mach-O. A fat header is also Java's class-file
+/// magic: real ones list few arches (the class version reads as thousands).
+fn read_macho_arch(header: &[u8]) -> Option<Option<&'static str>> {
     if header.len() < 8 {
         return None;
     }
     if MACHO_MAGICS.contains(&u32_le(header, 0)) {
-        return macho_arch(u32_le(header, 4));
+        return Some(macho_arch(u32_le(header, 4)));
     }
     if MACHO_MAGICS.contains(&u32_be(header, 0)) {
-        return macho_arch(u32_be(header, 4));
+        return Some(macho_arch(u32_be(header, 4)));
     }
-    None
-}
-
-/// Architecture of a binary from its header, or `None` if unrecognised.
-pub fn detect_binary_arch(path: &Path) -> Option<&'static str> {
-    let mut file = File::open(path).ok()?;
-    let header = read_header(&mut file);
-    if header.len() < 4 {
+    let count = u32_be(header, 4) as usize;
+    if u32_be(header, 0) != FAT_MAGIC || count == 0 || count >= MAX_FAT_ARCHES {
         return None;
     }
-    if header.starts_with(b"\x7fELF") {
-        return (header.len() >= 20)
-            .then(|| elf_arch(u16_le(&header, 18)))
-            .flatten();
-    }
-    if header.starts_with(b"MZ") {
-        return read_pe_arch(&mut file, &header);
-    }
-    read_macho_arch(&header)
+    // Entries are 20 bytes from offset 8, cputype first: those the header holds.
+    let arches: Vec<Option<&'static str>> = crate::core::unique(
+        (0..count)
+            .map(|i| 8 + i * 20)
+            .take_while(|at| at + 4 <= header.len())
+            .map(|at| macho_arch(u32_be(header, at))),
+    );
+    Some(if arches.len() == 1 { arches[0] } else { None })
 }
 
-/// True for ELF, PE or Mach-O files (by magic bytes, not permissions).
-pub fn is_executable(path: &Path) -> bool {
-    let Ok(mut file) = File::open(path) else {
-        return false;
-    };
-    let mut magic = Vec::with_capacity(4);
-    let _ = (&mut file).take(4).read_to_end(&mut magic);
-    if magic.len() < 2 {
-        return false;
-    }
-    if magic.starts_with(b"\x7fELF") || magic.starts_with(b"MZ") {
-        return true;
-    }
-    if magic.len() < 4 {
-        return false;
-    }
-    let known = |v: u32| MACHO_MAGICS.contains(&v) || v == FAT_MAGIC;
-    known(u32_le(&magic, 0)) || known(u32_be(&magic, 0))
+/// What the detector can run, from a file's first bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Program {
+    /// ELF (linux), PE (windows) or Mach-O (macos); `arch` is `None` for a
+    /// universal Mach-O or a machine we have no tag for.
+    Binary {
+        os: &'static str,
+        arch: Option<&'static str>,
+    },
+    /// A `#!` script: runs wherever its interpreter does.
+    Script,
 }
 
-/// An ELF or Mach-O program: runs natively, so needs the execute bit (unlike a
-/// Windows `.exe`, which Proton starts).
-pub fn is_native_binary(path: &Path) -> bool {
-    let mut magic = [0u8; 2];
-    let is_pe =
-        File::open(path).is_ok_and(|mut f| f.read_exact(&mut magic).is_ok() && &magic == b"MZ");
-    is_executable(path) && !is_pe
+/// The program `path` is, or `None` for anything else (text, data, libraries
+/// are told apart by name, not here).
+pub fn inspect(path: &Path) -> Option<Program> {
+    let mut file = File::open(path).ok()?;
+    let header = read_header(&mut file);
+    let binary = |os, arch| Some(Program::Binary { os, arch });
+    if header.starts_with(b"#!") {
+        Some(Program::Script)
+    } else if header.starts_with(b"\x7fELF") {
+        binary(
+            "linux",
+            (header.len() >= 20)
+                .then(|| elf_arch(u16_le(&header, 18)))
+                .flatten(),
+        )
+    } else if header.starts_with(b"MZ") {
+        binary("windows", read_pe_arch(&mut file, &header))
+    } else {
+        read_macho_arch(&header).and_then(|arch| binary("macos", arch))
+    }
+}
+
+/// A program this OS runs itself (ELF, Mach-O, script), so it needs the
+/// execute bit, unlike a Windows `.exe`, which Proton starts.
+pub fn needs_exec_bit(path: &Path) -> bool {
+    matches!(
+        inspect(path),
+        Some(
+            Program::Script
+                | Program::Binary {
+                    os: "linux" | "macos",
+                    ..
+                }
+        )
+    )
 }
 
 /// Add the execute bits its read bits allow (644 -> 755), like `chmod +x`.
@@ -177,35 +195,86 @@ mod tests {
     use super::*;
     use crate::core::testutil::TempDir;
 
-    #[test]
-    fn detects_elf_x64_and_pe_arm64() {
-        let dir = TempDir::new();
-        let mut elf = b"\x7fELF".to_vec();
-        elf.resize(64, 0);
-        elf[18] = 0x3E;
-        let elf_path = dir.write("game", &elf);
-        assert_eq!(detect_binary_arch(&elf_path), Some("x64"));
-        assert!(is_executable(&elf_path));
+    fn binary(os: &'static str, arch: Option<&'static str>) -> Option<Program> {
+        Some(Program::Binary { os, arch })
+    }
 
-        let mut pe = b"MZ".to_vec();
-        pe.resize(64, 0);
-        pe[60] = 64;
-        pe.extend_from_slice(b"PE\0\0");
-        pe.extend_from_slice(&0xAA64u16.to_le_bytes());
-        let pe_path = dir.write("game.exe", &pe);
-        assert_eq!(detect_binary_arch(&pe_path), Some("arm64"));
+    fn elf(machine: u8) -> Vec<u8> {
+        let mut bytes = b"\x7fELF".to_vec();
+        bytes.resize(64, 0);
+        bytes[18] = machine;
+        bytes
+    }
+
+    fn pe(machine: u16) -> Vec<u8> {
+        let mut bytes = b"MZ".to_vec();
+        bytes.resize(64, 0);
+        bytes[60] = 64;
+        bytes.extend_from_slice(b"PE\0\0");
+        bytes.extend_from_slice(&machine.to_le_bytes());
+        bytes
+    }
+
+    /// A universal Mach-O holding `cpus` (7 = x64, 12 = arm64, ABI64 bit set).
+    fn fat_macho(cpus: &[u32]) -> Vec<u8> {
+        let mut bytes = FAT_MAGIC.to_be_bytes().to_vec();
+        bytes.extend((cpus.len() as u32).to_be_bytes());
+        for cpu in cpus {
+            bytes.extend((cpu | 0x0100_0000).to_be_bytes());
+            bytes.extend([0; 16]);
+        }
+        bytes
     }
 
     #[test]
-    fn only_elf_and_macho_are_native_binaries() {
+    fn a_binary_tells_its_os_and_arch() {
         let dir = TempDir::new();
-        let mut elf = b"\x7fELF".to_vec();
-        elf.resize(64, 0);
-        let mut pe = b"MZ".to_vec();
-        pe.resize(64, 0);
-        assert!(is_native_binary(&dir.write("game", &elf)));
-        assert!(!is_native_binary(&dir.write("game.exe", &pe)));
-        assert!(!is_native_binary(&dir.write("readme.txt", b"hello")));
+        let inspect_bytes = |bytes: &[u8]| inspect(&dir.write("program", bytes));
+        let mut macho = 0xFEED_FACFu32.to_le_bytes().to_vec();
+        macho.extend(0x0100_000Cu32.to_le_bytes());
+        assert_eq!(inspect_bytes(&elf(0x3E)), binary("linux", Some("x64")));
+        assert_eq!(inspect_bytes(&pe(0xAA64)), binary("windows", Some("arm64")));
+        assert_eq!(inspect_bytes(&macho), binary("macos", Some("arm64")));
+        assert_eq!(inspect_bytes(&elf(0xF3)), binary("linux", None));
+    }
+
+    #[test]
+    fn a_universal_macho_runs_on_every_arch_it_holds() {
+        let dir = TempDir::new();
+        let inspect_bytes = |bytes: &[u8]| inspect(&dir.write("program", bytes));
+        assert_eq!(inspect_bytes(&fat_macho(&[7, 12])), binary("macos", None));
+        assert_eq!(
+            inspect_bytes(&fat_macho(&[12])),
+            binary("macos", Some("arm64"))
+        );
+    }
+
+    #[test]
+    fn a_java_class_file_is_not_a_universal_macho() {
+        let dir = TempDir::new();
+        let class = [0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0x00, 0x00, 0x34];
+        assert_eq!(inspect(&dir.write("Game.class", &class)), None);
+    }
+
+    #[test]
+    fn scripts_start_with_a_shebang_and_text_is_no_program() {
+        let dir = TempDir::new();
+        let inspect_bytes = |bytes: &[u8]| inspect(&dir.write("file", bytes));
+        assert_eq!(
+            inspect_bytes(b"#!/bin/bash\necho hi"),
+            Some(Program::Script)
+        );
+        assert_eq!(inspect_bytes(b"echo hi"), None);
+        assert_eq!(inspect_bytes(b""), None);
+    }
+
+    #[test]
+    fn programs_this_os_runs_itself_need_the_exec_bit() {
+        let dir = TempDir::new();
+        assert!(needs_exec_bit(&dir.write("game", &elf(0x3E))));
+        assert!(needs_exec_bit(&dir.write("start.sh", b"#!/bin/sh")));
+        assert!(!needs_exec_bit(&dir.write("game.exe", &pe(0x8664))));
+        assert!(!needs_exec_bit(&dir.write("readme.txt", b"hello")));
     }
 
     #[cfg(unix)]
@@ -221,13 +290,5 @@ mod tests {
         };
         assert_eq!(mode_after(0o644), 0o755);
         assert_eq!(mode_after(0o600), 0o700);
-    }
-
-    #[test]
-    fn text_files_are_not_executables() {
-        let dir = TempDir::new();
-        let path = dir.write("readme.txt", b"hello world");
-        assert!(!is_executable(&path));
-        assert_eq!(detect_binary_arch(&path), None);
     }
 }

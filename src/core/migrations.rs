@@ -3,6 +3,7 @@
 //! * `launch_manifest`  — legacy `launch_manifest.json` → `.cartridge/game.json`
 //! * `save_paths_format` — nested `savePaths` blocks → flat `{os, path}` list
 //! * `arch_x64`          — target arch `x86_64` → `x64`
+//! * `app_bundles`       — a bare `games/Foo.app` → `games/Foo/Foo.app`
 
 use std::path::{Path, PathBuf};
 
@@ -237,11 +238,61 @@ fn migrate_each_game(games_dir: &Path, change: fn(&mut Map<String, Value>) -> bo
 }
 
 /// Run every migration in order; returns (name, migrated count).
+/// A macOS bundle dropped straight into `games/` gets a folder of its own, so
+/// its `.cartridge/` lands beside it: inside, it would break the bundle's
+/// code signature and hide in Finder. A move on the same disk: the bundle is
+/// untouched. One that already holds a `.cartridge/` (an older app's) is left
+/// alone: its targets point inside it.
+fn wrap_app_bundles(games_dir: &Path) -> usize {
+    paths::sorted_entries(games_dir)
+        .into_iter()
+        .map(|name| games_dir.join(name))
+        .filter(|path| is_bare_bundle(path))
+        .filter(|bundle| wrap_bundle(bundle))
+        .count()
+}
+
+fn is_bare_bundle(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("app"))
+        && path.is_dir()
+        && !paths::is_symlink(path)
+        && !path.join(GAME_DATA_DIR).exists()
+}
+
+fn wrap_bundle(bundle: &Path) -> bool {
+    let (Some(stem), Some(name)) = (bundle.file_stem(), bundle.file_name()) else {
+        return false;
+    };
+    let folder = bundle.with_file_name(stem);
+    if folder.exists() {
+        warn!(
+            "Not moving {}: {} exists",
+            bundle.display(),
+            folder.display()
+        );
+        return false;
+    }
+    let moved =
+        std::fs::create_dir(&folder).and_then(|()| std::fs::rename(bundle, folder.join(name)));
+    if let Err(e) = moved {
+        let _ = std::fs::remove_dir(&folder);
+        error!(
+            "Failed to move {} into its own folder: {e}",
+            bundle.display()
+        );
+        return false;
+    }
+    info!("Moved {} into {}", bundle.display(), folder.display());
+    true
+}
+
 pub fn run_all(games_dir: &Path) -> Vec<(&'static str, usize)> {
     if !games_dir.is_dir() {
         return Vec::new();
     }
     let results = vec![
+        ("app_bundles", wrap_app_bundles(games_dir)),
         ("launch_manifest", migrate_launch_manifests(games_dir)),
         (
             "save_paths_format",
@@ -260,6 +311,32 @@ pub fn run_all(games_dir: &Path) -> Vec<(&'static str, usize)> {
 mod tests {
     use super::*;
     use crate::core::testutil::TempDir;
+
+    #[test]
+    fn a_bare_app_bundle_gets_a_folder_of_its_own() {
+        let dir = TempDir::new();
+        dir.write("Game.app/Contents/MacOS/Game", b"program");
+
+        assert_eq!(wrap_app_bundles(dir.path()), 1);
+        assert!(dir
+            .path()
+            .join("Game/Game.app/Contents/MacOS/Game")
+            .is_file());
+        assert!(!dir.path().join("Game.app").exists());
+        assert_eq!(wrap_app_bundles(dir.path()), 0);
+    }
+
+    #[test]
+    fn a_bundle_is_not_moved_over_an_existing_folder_or_with_its_own_metadata() {
+        let dir = TempDir::new();
+        dir.write("Game.app/Contents/MacOS/Game", b"program");
+        dir.write("Game/readme.txt", b"other game");
+        dir.write("Old.app/.cartridge/game.json", b"{}");
+
+        assert_eq!(wrap_app_bundles(dir.path()), 0);
+        assert!(dir.path().join("Game.app").is_dir());
+        assert!(dir.path().join("Old.app").is_dir());
+    }
 
     fn read(path: PathBuf) -> Value {
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
