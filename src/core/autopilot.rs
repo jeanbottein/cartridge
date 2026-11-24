@@ -328,7 +328,7 @@ mod tests {
     #[test]
     fn an_unchanged_folder_is_no_change() {
         let dir = TempDir::new();
-        dir.mkdir("games/Celeste");
+        dir.mkdir("games/SomeGame");
         let mut watcher = watching(&dir);
         assert!(!watcher.tick());
         assert!(!watcher.tick());
@@ -338,9 +338,9 @@ mod tests {
     fn a_new_folder_counts_once_it_stops_changing() {
         let dir = TempDir::new();
         let mut watcher = watching(&dir);
-        dir.write("games/Celeste/part1", b"1");
+        dir.write("games/SomeGame/part1", b"1");
         assert!(!watcher.tick());
-        dir.write("games/Celeste/data/part2", b"22"); // still copying
+        dir.write("games/SomeGame/data/part2", b"22"); // still copying
         assert!(!watcher.tick());
         assert!(watcher.tick());
         assert!(!watcher.tick());
@@ -350,9 +350,9 @@ mod tests {
     fn a_growing_package_counts_once_it_stops_changing() {
         let dir = TempDir::new();
         let mut watcher = watching(&dir);
-        dir.write("games/Hades.cartridge.tar", b"1");
+        dir.write("games/Packaged.cartridge.tar", b"1");
         assert!(!watcher.tick());
-        dir.write("games/Hades.cartridge.tar", b"12");
+        dir.write("games/Packaged.cartridge.tar", b"12");
         assert!(!watcher.tick());
         assert!(watcher.tick());
     }
@@ -360,7 +360,7 @@ mod tests {
     #[test]
     fn a_removed_folder_counts_at_the_next_check() {
         let dir = TempDir::new();
-        let game = dir.mkdir("games/Celeste");
+        let game = dir.mkdir("games/SomeGame");
         let mut watcher = watching(&dir);
         std::fs::remove_dir(game).unwrap();
         assert!(!watcher.tick());
@@ -371,7 +371,7 @@ mod tests {
     fn a_folder_gone_before_settling_is_no_change() {
         let dir = TempDir::new();
         let mut watcher = watching(&dir);
-        let game = dir.mkdir("games/Celeste");
+        let game = dir.mkdir("games/SomeGame");
         assert!(!watcher.tick());
         std::fs::remove_dir(game).unwrap();
         assert!(!watcher.tick());
@@ -382,7 +382,7 @@ mod tests {
     fn staging_and_other_files_are_ignored() {
         let dir = TempDir::new();
         let mut watcher = watching(&dir);
-        dir.write("games/.Celeste.part/data", b"1");
+        dir.write("games/.SomeGame.part/data", b"1");
         dir.write("games/manifests.json", b"[]");
         assert!(!watcher.tick());
     }
@@ -390,9 +390,9 @@ mod tests {
     #[test]
     fn writing_inside_a_known_game_is_no_change() {
         let dir = TempDir::new();
-        dir.mkdir("games/Celeste");
+        dir.mkdir("games/SomeGame");
         let mut watcher = watching(&dir);
-        dir.write("games/Celeste/.cartridge/game.json", b"{}");
+        dir.write("games/SomeGame/.cartridge/game.json", b"{}");
         assert!(!watcher.tick());
     }
 }

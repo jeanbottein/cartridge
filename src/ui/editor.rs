@@ -43,7 +43,7 @@ enum Pending {
 
 type FetchResult = Result<Images, String>;
 
-/// `Celeste (2018)`, marked when it is the game's current match.
+/// `SomeGame (2018)`, marked when it is the game's current match.
 fn match_label(hit: &SearchHit, current: Option<i64>) -> String {
     let name = hit.name.as_deref().unwrap_or("?");
     let year = hit.year.map(|y| format!(" ({y})")).unwrap_or_default();
@@ -860,9 +860,9 @@ mod tests {
 
     #[test]
     fn match_label_shows_year_and_marks_the_current_match() {
-        let celeste = hit(7, Some("Celeste"), Some(2018));
-        assert_eq!(match_label(&celeste, None), "Celeste (2018)");
-        assert_eq!(match_label(&celeste, Some(7)), "Celeste (2018) - current");
+        let somegame = hit(7, Some("SomeGame"), Some(2018));
+        assert_eq!(match_label(&somegame, None), "SomeGame (2018)");
+        assert_eq!(match_label(&somegame, Some(7)), "SomeGame (2018) - current");
         assert_eq!(match_label(&hit(8, None, None), Some(7)), "?");
     }
 

@@ -514,8 +514,8 @@ mod tests {
     #[test]
     fn quote_matches_urllib() {
         assert_eq!(
-            quote("Hollow Knight: Silk/Song!"),
-            "Hollow%20Knight%3A%20Silk/Song%21"
+            quote("Other Game: Part/Two!"),
+            "Other%20Game%3A%20Part/Two%21"
         );
     }
 
@@ -534,13 +534,13 @@ mod tests {
         let cfg = Config::from_raw("/ws/system/config.txt".into(), Default::default());
         let mut cache = Map::new();
         cache.insert(
-            "celeste".into(),
-            json!({"game_id": 7, "name": "Celeste", "year": 2018, "urls": {"icon": "https://i/1.ico", "poster": null}}),
+            "somegame".into(),
+            json!({"game_id": 7, "name": "SomeGame", "year": 2018, "urls": {"icon": "https://i/1.ico", "poster": null}}),
         );
-        let info = lookup("Celeste", None, "unused", &mut cache, &cfg).unwrap();
+        let info = lookup("SomeGame", None, "unused", &mut cache, &cfg).unwrap();
         assert_eq!(
             (info.id, info.name.as_deref(), info.year),
-            (7, Some("Celeste"), Some(2018))
+            (7, Some("SomeGame"), Some(2018))
         );
         assert_eq!(image_names(&info.urls).icon.as_deref(), Some("icon.ico"));
 
@@ -554,9 +554,9 @@ mod tests {
     #[test]
     fn search_hits_keep_order_and_skip_entries_without_id() {
         let hits: Vec<SearchHit> = [
-            json!({"id": 2, "name": "Celeste", "release_date": 1_516_838_400}),
+            json!({"id": 2, "name": "SomeGame", "release_date": 1_516_838_400}),
             json!({"name": "No id"}),
-            json!({"id": 9, "name": "Celeste Classic"}),
+            json!({"id": 9, "name": "SomeGame Classic"}),
         ]
         .iter()
         .filter_map(search_hit)
@@ -608,19 +608,19 @@ mod tests {
     #[test]
     fn apply_keeps_existing_images() {
         let mut game = Game {
-            title: "celeste".into(),
+            title: "somegame".into(),
             ..Default::default()
         };
         game.images.cover = Some("mine.png".into());
         let info = SgdbInfo {
             id: 7,
-            name: Some("Celeste".into()),
+            name: Some("SomeGame".into()),
             urls: urls(&[("poster", Some("u/p.jpg")), ("hero", Some("u/h.jpg"))]),
             year: Some(2018),
         };
         assert!(would_change(&game, &info));
         apply(&mut game, info);
-        assert_eq!(game.title, "Celeste");
+        assert_eq!(game.title, "SomeGame");
         assert_eq!(game.images.cover.as_deref(), Some("mine.png"));
         assert_eq!(game.images.hero.as_deref(), Some("hero.jpg"));
     }

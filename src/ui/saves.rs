@@ -547,7 +547,7 @@ mod tests {
         let game = Game::skeleton(&dir.path().join("games/Game"));
         let shown = Shown {
             folder: "Game".into(),
-            title: "Celeste".into(),
+            title: "SomeGame".into(),
             saves: saver::saves_of(&game, &dir.path().join("saves-copies")),
             report: report(stamp(2), stamp(1)),
         };

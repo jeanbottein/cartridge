@@ -83,24 +83,21 @@ mod tests {
     #[test]
     fn appid_matches_python_generate_appid() {
         assert_eq!(
-            generate_appid("Hollow Knight", "/g/Hollow Knight/hollow_knight.exe"),
-            3770780903
+            generate_appid("Other Game", "/g/Other Game/other_game.exe"),
+            2837777894
         );
-        assert_eq!(
-            generate_appid("Hollow Knight", "/g/HK/hk.x86_64"),
-            2664893048
-        );
-        assert_eq!(signed32(2664893048), -1630074248);
+        assert_eq!(generate_appid("Other Game", "/g/OG/og.x86_64"), 2258095278);
+        assert_eq!(signed32(2258095278), -2036872018);
     }
 
     #[test]
     fn without_a_stored_appid_it_comes_from_title_and_exe() {
-        let mut game = Game::skeleton(Path::new("/g/Hollow Knight"));
-        game.title = "Hollow Knight".into();
+        let mut game = Game::skeleton(Path::new("/g/Other Game"));
+        game.title = "Other Game".into();
         game.resolved = Some(Resolved {
-            target: "/g/Hollow Knight/hollow_knight.exe".into(),
+            target: "/g/Other Game/other_game.exe".into(),
             ..Default::default()
         });
-        assert_eq!(appid_of(&game), Some(3770780903));
+        assert_eq!(appid_of(&game), Some(2837777894));
     }
 }

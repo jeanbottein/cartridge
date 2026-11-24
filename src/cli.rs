@@ -161,24 +161,24 @@ mod tests {
 
     #[test]
     fn package_flags() {
-        let args = parse_str("--pack Celeste /ws").unwrap();
-        assert_eq!(args.mode, Mode::Pack("Celeste".into()));
+        let args = parse_str("--pack SomeGame /ws").unwrap();
+        assert_eq!(args.mode, Mode::Pack("SomeGame".into()));
         assert_eq!(args.dir, Some(PathBuf::from("/ws")));
         assert_eq!(
-            parse_str("--unpack Celeste").unwrap().mode,
-            Mode::Unpack("Celeste".into())
+            parse_str("--unpack SomeGame").unwrap().mode,
+            Mode::Unpack("SomeGame".into())
         );
         assert_eq!(
-            parse_str("/ws --pack Celeste").unwrap().dir,
+            parse_str("/ws --pack SomeGame").unwrap().dir,
             Some(PathBuf::from("/ws"))
         );
         assert!(parse_str("--pack").is_err());
         assert_eq!(parse_str("--serve /ws").unwrap().mode, Mode::Serve);
         assert_eq!(
-            parse_str("--install deck Celeste").unwrap().mode,
+            parse_str("--install deck SomeGame").unwrap().mode,
             Mode::Install {
                 peer: "deck".into(),
-                game: "Celeste".into()
+                game: "SomeGame".into()
             }
         );
         assert!(parse_str("--download deck").is_err());

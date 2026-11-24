@@ -229,7 +229,7 @@ fn words(text: &str) -> impl Iterator<Item = &str> {
 }
 
 /// OS named in a path (`game-linux64/run`, `game_osx/start.sh`), by whole
-/// words: "mac" inside "machinarium" says nothing.
+/// words: "mac" inside "machine" says nothing.
 fn os_hint(text: &str) -> Option<&'static str> {
     if words(text).any(|w| w.starts_with("linux")) {
         Some("linux")
@@ -627,11 +627,11 @@ mod tests {
     fn similarity_matches_python_difflib() {
         // Golden values from difflib.SequenceMatcher(None, a, b).ratio()
         let cases = [
-            ("Hollow Knight", "hollow_knight", 0.7692307692307693),
-            ("Celeste", "Celeste.bin.x86_64", 0.56),
+            ("Other Game", "other_game", 0.7),
+            ("SomeGame", "SomeGame.bin.x86_64", 0.5925925925925926),
             ("abcabc", "cbacba", 0.5),
             ("Game", "UnityCrashHandler64", 0.17391304347826086),
-            ("Stardew Valley", "StardewValley", 0.9629629629629629),
+            ("Farm Valley", "FarmValley", 0.9523809523809523),
         ];
         for (a, b, expected) in cases {
             assert!((similarity(a, b) - expected).abs() < 1e-12, "{a} vs {b}");
@@ -658,26 +658,26 @@ mod tests {
     #[test]
     fn detects_one_target_per_os_arch_with_best_name() {
         let dir = TempDir::new();
-        let game = dir.mkdir("Celeste");
+        let game = dir.mkdir("SomeGame");
         for name in [
-            "Celeste/wrapper/Celeste.bin.x86_64",
-            "Celeste/wrapper/crashpad",
+            "SomeGame/wrapper/SomeGame.bin.x86_64",
+            "SomeGame/wrapper/crashpad",
         ] {
             make_exec(&dir.write(name, &elf()));
         }
         let mut pe = b"MZ".to_vec();
         pe.resize(64, 0);
-        dir.write("Celeste/wrapper/Celeste.exe", &pe);
-        dir.write("Celeste/readme.txt", b"hi");
+        dir.write("SomeGame/wrapper/SomeGame.exe", &pe);
+        dir.write("SomeGame/readme.txt", b"hi");
 
         let targets = collect_targets(&game);
-        assert_eq!(title_for(&game), "Celeste");
+        assert_eq!(title_for(&game), "SomeGame");
         let native = targets.iter().find(|t| t.os == "linux").unwrap();
         assert_eq!(native.arch, "x64");
-        assert_eq!(native.target, "wrapper/Celeste.bin.x86_64");
+        assert_eq!(native.target, "wrapper/SomeGame.bin.x86_64");
         assert_eq!(native.start_in, "wrapper");
         let windows = targets.iter().find(|t| t.os == "windows").unwrap();
-        assert_eq!(windows.target, "wrapper/Celeste.exe");
+        assert_eq!(windows.target, "wrapper/SomeGame.exe");
     }
 
     /// A launcher script beside a 32-bit and a 64-bit build, which share
@@ -867,13 +867,13 @@ mod tests {
     #[test]
     fn a_64_in_a_helper_name_does_not_beat_the_game_exe() {
         let dir = TempDir::new();
-        let game = dir.mkdir("Hollow Knight");
-        dir.write("Hollow Knight/hollow_knight.exe", &pe(0x8664));
-        dir.write("Hollow Knight/UnityCrashHandler64.exe", &pe(0x8664));
+        let game = dir.mkdir("Other Game");
+        dir.write("Other Game/other_game.exe", &pe(0x8664));
+        dir.write("Other Game/UnityCrashHandler64.exe", &pe(0x8664));
 
         let targets = collect_targets(&game);
         assert_eq!(targets.len(), 1);
-        assert_eq!(targets[0].target, "hollow_knight.exe");
+        assert_eq!(targets[0].target, "other_game.exe");
     }
 
     #[test]
@@ -955,16 +955,16 @@ mod tests {
     #[test]
     fn detection_keeps_a_title_the_game_json_already_has() {
         let dir = TempDir::new();
-        let game_dir = dir.mkdir("HK_v1.5");
-        dir.write("HK_v1.5/hollow_knight.exe", &pe(0x8664));
+        let game_dir = dir.mkdir("OG_v1.5");
+        dir.write("OG_v1.5/other_game.exe", &pe(0x8664));
         let mut games = [Game {
-            title: "Hollow Knight".into(),
+            title: "Other Game".into(),
             ..Game::skeleton(&game_dir)
         }];
 
         detect(&mut games);
         assert_eq!(games[0].targets.len(), 1);
-        assert_eq!(games[0].title, "Hollow Knight");
+        assert_eq!(games[0].title, "Other Game");
     }
 
     /// Write a file without execute bits (as a copy that lost them leaves it).
@@ -987,9 +987,9 @@ mod tests {
     fn programs_that_lost_their_execute_bit_are_candidates_libraries_are_not() {
         let dir = TempDir::new();
         let candidate = |name: &str| program_of(&write_644(&dir, name, &elf())).is_some();
-        assert!(candidate("Strange Flesh.AppImage"));
-        assert!(candidate("BanjoRecompiled"));
-        assert!(candidate("Celeste.bin.x86_64"));
+        assert!(candidate("Third Game.AppImage"));
+        assert!(candidate("ExampleRecompiled"));
+        assert!(candidate("SomeGame.bin.x86_64"));
         assert!(!candidate("libgame.so"));
         assert!(!candidate("libgame.so.6"));
         assert!(program_of(&write_644(&dir, "notes", b"not a program")).is_none());
@@ -999,14 +999,14 @@ mod tests {
     #[test]
     fn detect_finds_and_repairs_a_program_without_execute_bit() {
         let dir = TempDir::new();
-        let game_dir = dir.mkdir("Strange Flesh");
-        let exe = write_644(&dir, "Strange Flesh/Strange Flesh.AppImage", &elf());
+        let game_dir = dir.mkdir("Third Game");
+        let exe = write_644(&dir, "Third Game/Third Game.AppImage", &elf());
         let mut games = [Game {
             dir: game_dir,
             ..Default::default()
         }];
         detect(&mut games);
-        assert_eq!(games[0].targets[0].target, "Strange Flesh.AppImage");
+        assert_eq!(games[0].targets[0].target, "Third Game.AppImage");
         assert_eq!(mode(&exe), 0o755);
     }
 
@@ -1084,7 +1084,7 @@ mod tests {
     fn os_and_arch_hints_are_read_from_names() {
         assert_eq!(os_hint("game-linux64/run"), Some("linux"));
         assert_eq!(os_hint("game_osx/run.sh"), Some("macos"));
-        assert_eq!(os_hint("machinarium/run.sh"), None);
+        assert_eq!(os_hint("machine/run.sh"), None);
         assert_eq!(arch_hint("game-amd64"), Some("x64"));
         assert_eq!(arch_hint("game-aarch64"), Some("arm64"));
         assert_eq!(arch_hint("game.bin.x86_64"), Some("x64"));

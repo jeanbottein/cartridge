@@ -170,7 +170,7 @@ mod tests {
     }
 
     fn windows_game_pinned(version: &str) -> Game {
-        let mut game = Game::skeleton(Path::new("/g/Rayman"));
+        let mut game = Game::skeleton(Path::new("/g/WinGame"));
         game.proton.version = version.into();
         game
     }

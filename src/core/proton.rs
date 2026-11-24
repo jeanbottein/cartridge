@@ -669,7 +669,7 @@ mod tests {
     #[test]
     fn runs_in_the_build_steam_has_for_the_shortcut() {
         let game = windows_game();
-        let appid = steam::generate_appid("Rayman", "/g/Rayman/Rayman.exe");
+        let appid = steam::generate_appid("WinGame", "/g/WinGame/WinGame.exe");
         let config = format!(
             r#""InstallConfigStore" {{ "Software" {{ "Valve" {{ "Steam" {{
             "CompatToolMapping" {{ "{appid}" {{ "name" "proton_9" }} }} }} }} }} }}"#
@@ -755,11 +755,11 @@ mod tests {
     }
 
     fn windows_game() -> Game {
-        let mut game = Game::skeleton(Path::new("/g/Rayman"));
-        game.title = "Rayman".into();
+        let mut game = Game::skeleton(Path::new("/g/WinGame"));
+        game.title = "WinGame".into();
         game.resolved = Some(Resolved {
-            target: "/g/Rayman/Rayman.exe".into(),
-            start_in: "/g/Rayman".into(),
+            target: "/g/WinGame/WinGame.exe".into(),
+            start_in: "/g/WinGame".into(),
             launch_options: "-w".into(),
             os: "windows".into(),
         });
@@ -789,19 +789,19 @@ mod tests {
                 Path::new("--"),
                 &proton,
                 Path::new("waitforexitandrun"),
-                Path::new("/g/Rayman/Rayman.exe"),
+                Path::new("/g/WinGame/WinGame.exe"),
                 Path::new("-w"),
             ]
         );
         let env: BTreeMap<&OsStr, Option<&OsStr>> = cmd.get_envs().collect();
-        let appid = steam::generate_appid("Rayman", "/g/Rayman/Rayman.exe");
+        let appid = steam::generate_appid("WinGame", "/g/WinGame/WinGame.exe");
         let compat = steam.path().join(format!("steamapps/compatdata/{appid}"));
         assert_eq!(
             env[OsStr::new("STEAM_COMPAT_DATA_PATH")].map(Path::new),
             Some(compat.as_path())
         );
         assert_eq!(env[OsStr::new("PROTON_LOG")], Some(OsStr::new("1")));
-        assert_eq!(cmd.get_current_dir(), Some(Path::new("/g/Rayman")));
+        assert_eq!(cmd.get_current_dir(), Some(Path::new("/g/WinGame")));
     }
 
     #[test]

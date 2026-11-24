@@ -174,9 +174,9 @@ mod tests {
         let golden = vdf::parse_binary(include_bytes!("../../../testdata/shortcuts.vdf")).unwrap();
         let expected = golden.get_map("shortcuts").unwrap().get_map("0").unwrap();
         let built = make_shortcut(
-            "Hollow Knight",
-            "/g/HK/hk.x86_64",
-            "/g/HK",
+            "Other Game",
+            "/g/OG/og.x86_64",
+            "/g/OG",
             "-v",
             "/grid/1_icon.png",
             &["golden"],

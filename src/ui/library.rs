@@ -551,7 +551,7 @@ mod tests {
     fn a_load_shows_once_the_background_read_arrives() {
         let dir = TempDir::new();
         dir.write("system/config.txt", b"");
-        dir.mkdir("games/Celeste");
+        dir.mkdir("games/SomeGame");
         let cfg = Config::load(&dir.path().join("system/config.txt"));
         let mut library = Library::default();
 
@@ -560,6 +560,6 @@ mod tests {
         let snapshot = library.pending.take().unwrap().recv().unwrap();
         library.apply(snapshot);
         assert!(!library.first_load());
-        assert_eq!(library.games[0].folder_name, "Celeste");
+        assert_eq!(library.games[0].folder_name, "SomeGame");
     }
 }

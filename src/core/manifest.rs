@@ -59,7 +59,7 @@ mod tests {
     fn writes_only_games_with_targets() {
         let dir = TempDir::new();
         let mut game = Game {
-            title: "Celeste".into(),
+            title: "SomeGame".into(),
             steamgriddb_id: Some(9),
             ..Default::default()
         };
@@ -82,7 +82,7 @@ mod tests {
         let written: Value = serde_json::from_str(&std::fs::read_to_string(out).unwrap()).unwrap();
         assert_eq!(
             written,
-            json!([{"title": "Celeste", "target": "/g/c", "startIn": "/g", "launchOptions": "", "savePath": "/s/1", "steamgriddb_id": 9}])
+            json!([{"title": "SomeGame", "target": "/g/c", "startIn": "/g", "launchOptions": "", "savePath": "/s/1", "steamgriddb_id": 9}])
         );
     }
 

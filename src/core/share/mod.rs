@@ -147,7 +147,7 @@ mod tests {
 
     #[test]
     fn segments_round_trip() {
-        let name = "Hollow Knight: Silk/Song é";
+        let name = "Other Game: Part/Two é";
         let encoded = encode_segment(name);
         assert!(!encoded.contains(' ') && !encoded.contains('/'));
         assert_eq!(decode_segment(&encoded).as_deref(), Some(name));
