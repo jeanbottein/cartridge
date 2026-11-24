@@ -548,12 +548,12 @@ mod tests {
 
     const SAMPLE: &str = r#"{
     "schema_version": 2,
-    "title": "Celeste",
+    "title": "SomeGame",
     "targets": [
         {
             "os": "linux",
             "arch": "x64",
-            "target": "Celeste.bin.x86_64",
+            "target": "SomeGame.bin.x86_64",
             "startIn": ".",
             "launchOptions": ""
         }
@@ -561,7 +561,7 @@ mod tests {
     "savePaths": [
         {
             "os": "linux",
-            "path": "~/.local/share/Celeste"
+            "path": "~/.local/share/SomeGame"
         }
     ],
     "images": {
@@ -574,8 +574,8 @@ mod tests {
 
     #[test]
     fn round_trips_byte_identically() {
-        let game = Game::from_json(Path::new("/g/Celeste"), SAMPLE).unwrap();
-        assert_eq!(game.title, "Celeste");
+        let game = Game::from_json(Path::new("/g/SomeGame"), SAMPLE).unwrap();
+        assert_eq!(game.title, "SomeGame");
         assert_eq!(game.targets[0].start_in, ".");
         assert_eq!(game.steamgriddb_id, Some(1234));
         assert_eq!(game.to_json(), SAMPLE);
@@ -584,11 +584,11 @@ mod tests {
     #[test]
     fn a_game_of_a_newer_schema_is_read_but_not_writable() {
         let game = Game::from_json(
-            Path::new("/g/Celeste"),
-            r#"{"schema_version": 3, "title": "Celeste", "future": {"x": 1}}"#,
+            Path::new("/g/SomeGame"),
+            r#"{"schema_version": 3, "title": "SomeGame", "future": {"x": 1}}"#,
         )
         .unwrap();
-        assert_eq!(game.title, "Celeste");
+        assert_eq!(game.title, "SomeGame");
         assert!(game.is_from_newer_app() && !game.is_writable());
     }
 
@@ -615,12 +615,12 @@ mod tests {
     #[test]
     fn steam_appid_round_trips_and_is_left_out_when_unknown() {
         let mut game =
-            Game::from_json(Path::new("/g/Celeste"), r#"{"steam_appid": 3770780903}"#).unwrap();
+            Game::from_json(Path::new("/g/SomeGame"), r#"{"steam_appid": 3770780903}"#).unwrap();
         assert_eq!(game.steam_appid, Some(3_770_780_903));
         assert!(game.to_json().contains("\"steam_appid\": 3770780903"));
         game.steam_appid = None;
         assert!(!game.to_json().contains("steam_appid"));
-        let zero = Game::from_json(Path::new("/g/Celeste"), r#"{"steam_appid": 0}"#).unwrap();
+        let zero = Game::from_json(Path::new("/g/SomeGame"), r#"{"steam_appid": 0}"#).unwrap();
         assert_eq!(zero.steam_appid, None);
     }
 
@@ -691,7 +691,7 @@ mod tests {
     fn round_trips_proton_settings() {
         let text = r#"{
     "schema_version": 2,
-    "title": "Rayman",
+    "title": "WinGame",
     "targets": [],
     "proton": {
         "version": "proton_9",
@@ -706,7 +706,7 @@ mod tests {
     "savePaths": [],
     "images": {}
 }"#;
-        let game = Game::from_json(Path::new("/g/Rayman"), text).unwrap();
+        let game = Game::from_json(Path::new("/g/WinGame"), text).unwrap();
         assert_eq!(game.proton.version, "proton_9");
         assert_eq!(game.proton.winetricks, ["d3dx9", "vcrun2019"]);
         assert_eq!(game.to_json(), text);
@@ -768,16 +768,16 @@ mod tests {
     fn round_trips_the_update_source_and_omits_it_when_unset() {
         let text = r#"{
     "schema_version": 2,
-    "title": "Banjo",
+    "title": "Example",
     "targets": [],
     "savePaths": [],
     "images": {},
     "update": {
-        "url": "https://github.com/BanjoRecomp/BanjoRecomp/releases/latest",
+        "url": "https://github.com/ExampleRecomp/ExampleRecomp/releases/latest",
         "installed": "v1.0.2"
     }
 }"#;
-        let game = Game::from_json(Path::new("/g/Banjo"), text).unwrap();
+        let game = Game::from_json(Path::new("/g/Example"), text).unwrap();
         assert!(game.has_update_url());
         assert_eq!(game.update.installed, "v1.0.2");
         assert_eq!(game.to_json(), text);

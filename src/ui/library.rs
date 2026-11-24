@@ -14,6 +14,7 @@ use super::engine::input::Action;
 use super::engine::theme;
 use super::info::{self, Info};
 use super::jobs::Jobs;
+use super::kiosk::{self, Level};
 use super::launcher::{self, Session};
 use super::style::{self, Toast};
 use super::{draw_spinner, Hint, Ui};
@@ -85,6 +86,7 @@ impl Snapshot {
             .games_dir()
             .map(|dir| scanner::load_library(&dir))
             .unwrap_or_default();
+        let games = kiosk::shown(games, Level::of(cfg.get(kiosk::KEY)));
         let package_sizes = games
             .iter()
             .map(|g| Some(std::fs::metadata(g.package()?).ok()?.len()))
@@ -156,6 +158,12 @@ impl Library {
         self.in_steam = snapshot.in_steam;
         self.steam_detected = snapshot.steam_detected;
         self.downloads = snapshot.downloads;
+    }
+
+    /// The focused game as its game.json says now: a target fixed by hand
+    /// is the one launched or edited, without restarting the app.
+    fn reread_focused(&mut self) {
+        self.games[self.cursor] = scanner::reload(&self.games[self.cursor]);
     }
 
     /// Still reading the library for the first time.
@@ -281,9 +289,12 @@ impl Library {
         let installed = game.is_installed();
 
         if ui.action(Action::Edit) {
+            if !busy && installed {
+                self.reread_focused();
+            }
             return match (busy, installed) {
                 (true, _) => Some(Event::Cancel(id)),
-                (false, true) if game.is_from_newer_app() => {
+                (false, true) if self.games[self.cursor].is_from_newer_app() => {
                     self.toast.show(NEWER_APP, theme::secondary());
                     None
                 }
@@ -309,6 +320,7 @@ impl Library {
         if !installed {
             return Some(Event::Unpack(self.cursor));
         }
+        self.reread_focused();
         match launcher::launch(&self.games[self.cursor], &self.downloads) {
             Ok(session) => Some(Event::Launched(session)),
             Err(message) => {
@@ -551,7 +563,7 @@ mod tests {
     fn a_load_shows_once_the_background_read_arrives() {
         let dir = TempDir::new();
         dir.write("system/config.txt", b"");
-        dir.mkdir("games/Celeste");
+        dir.mkdir("games/SomeGame");
         let cfg = Config::load(&dir.path().join("system/config.txt"));
         let mut library = Library::default();
 
@@ -560,6 +572,6 @@ mod tests {
         let snapshot = library.pending.take().unwrap().recv().unwrap();
         library.apply(snapshot);
         assert!(!library.first_load());
-        assert_eq!(library.games[0].folder_name, "Celeste");
+        assert_eq!(library.games[0].folder_name, "SomeGame");
     }
 }

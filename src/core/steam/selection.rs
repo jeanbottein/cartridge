@@ -76,10 +76,10 @@ mod tests {
         dir.write("system/config.txt", b"");
         let cfg = Config::load(&dir.path().join("system/config.txt"));
         assert!(load_selection(&cfg).is_none());
-        save_selection(&cfg, BTreeSet::from(["Celeste".to_string()])).unwrap();
+        save_selection(&cfg, BTreeSet::from(["SomeGame".to_string()])).unwrap();
         assert_eq!(
             games_in_steam(&cfg, &[]),
-            BTreeSet::from(["Celeste".to_string()])
+            BTreeSet::from(["SomeGame".to_string()])
         );
     }
 }

@@ -360,8 +360,8 @@ mod tests {
     fn binary_round_trip_is_byte_identical_to_python_vdf() {
         let root = parse_binary(GOLDEN).unwrap();
         let shortcut = root.get_map("shortcuts").unwrap().get_map("0").unwrap();
-        assert_eq!(shortcut.get_str("AppName"), Some("Hollow Knight"));
-        assert_eq!(shortcut.get_int("appid"), Some(-1630074248));
+        assert_eq!(shortcut.get_str("AppName"), Some("Other Game"));
+        assert_eq!(shortcut.get_int("appid"), Some(-2036872018));
         assert_eq!(
             shortcut.get_map("tags").unwrap().get_str("0"),
             Some("golden")

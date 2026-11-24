@@ -13,6 +13,7 @@ mod form;
 mod info;
 mod jobs;
 mod keyboard;
+mod kiosk;
 mod launcher;
 mod library;
 mod list;
@@ -31,7 +32,7 @@ use std::sync::Arc;
 
 use macroquad::prelude::*;
 
-use crate::core::app::find_system_dir;
+use crate::core::app::{find_system_dir, DISPLAY_NAME};
 use crate::core::config::Config;
 use crate::core::init;
 use engine::canvas::{Canvas, Layout};
@@ -55,18 +56,16 @@ pub fn wants_fullscreen(window_mode: Option<&str>, gamescope: bool) -> bool {
     gamescope || !window_mode.is_some_and(|m| m.trim().eq_ignore_ascii_case("window"))
 }
 
-/// The window mode of the cartridge the app is about to open.
-fn starts_fullscreen(cli_dir: Option<&Path>) -> bool {
-    let cfg = find_system_dir(cli_dir).map(|dir| Config::load(&init::config_in(&dir)));
-    wants_fullscreen(
-        cfg.as_ref().and_then(|c| c.get("WINDOW_MODE")),
-        under_gamescope(),
-    )
+/// The config of the cartridge the app is about to open, if it has one yet.
+fn opening_config(cli_dir: Option<&Path>) -> Option<Config> {
+    find_system_dir(cli_dir).map(|dir| Config::load(&init::config_in(&dir)))
 }
 
-fn window_conf(fullscreen: bool) -> Conf {
+/// The window is named after the cartridge's folder (`SD4Deck`), like its
+/// Steam shortcut: SteamOS shows that name.
+fn window_conf(fullscreen: bool, title: String) -> Conf {
     let mut conf = Conf {
-        window_title: "•cartridge".to_owned(),
+        window_title: title,
         window_width: 1280,
         window_height: 720,
         high_dpi: true,
@@ -81,9 +80,14 @@ fn window_conf(fullscreen: bool) -> Conf {
 
 /// Open the window and run the UI until the user quits.
 pub fn run(cli_dir: Option<&Path>) {
-    let fullscreen = starts_fullscreen(cli_dir);
+    let cfg = opening_config(cli_dir);
+    let fullscreen = wants_fullscreen(
+        cfg.as_ref().and_then(|c| c.get("WINDOW_MODE")),
+        under_gamescope(),
+    );
+    let title = cfg.map_or_else(|| DISPLAY_NAME.to_string(), |c| c.label());
     let cli_dir: Option<PathBuf> = cli_dir.map(Path::to_path_buf);
-    macroquad::Window::from_config(window_conf(fullscreen), async move {
+    macroquad::Window::from_config(window_conf(fullscreen, title), async move {
         // Closing the window asks the app first (e.g. "restart Steam?").
         prevent_quit();
         let mut app = app::App::new(cli_dir, fullscreen);

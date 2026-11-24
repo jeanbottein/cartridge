@@ -18,6 +18,14 @@
 # Background music volume, in percent (0-100).
 #MUSIC_VOLUME=50
 
+# Kiosk mode: off, on or strict. Children-proof: only the Library, with no
+# editing, no Steam button and no other tab.
+# on: launch a game, or quit the app. strict: launch a game, nothing else.
+# To leave it: hold L1 + R1 + X on a gamepad (Q + E + X on a keyboard) for
+# 5 seconds, or set this back to off here.
+# Default: off
+#KIOSK_MODE=off
+
 # Widescreen layout: auto, on or off
 # auto: side panels on screens 3:2 or wider (16:10, 16:9...), 4:3 otherwise;
 # portrait screens get the 4:3 layout extended downwards.

@@ -333,15 +333,15 @@ mod tests {
     #[test]
     fn copies_of_a_game_are_the_others_with_its_appid() {
         let library = [
-            installed("Celeste", 7),
-            installed("Celeste copy", 7),
+            installed("SomeGame", 7),
+            installed("SomeGame copy", 7),
             installed("Other", 8),
         ];
         let names: Vec<&str> = duplicates_of(&library[0], &library)
             .iter()
             .map(|g| g.folder_name.as_str())
             .collect();
-        assert_eq!(names, ["Celeste copy"]);
+        assert_eq!(names, ["SomeGame copy"]);
         assert!(duplicates_of(&library[2], &library).is_empty());
     }
 
@@ -377,14 +377,14 @@ mod tests {
     fn export_adds_once_then_updates_renamed_games() {
         let dir = TempDir::new();
         let config_dir = dir.mkdir("userdata/1/config");
-        let mut game = Game::skeleton(&dir.mkdir("games/Celeste"));
-        game.title = "Celeste".into();
+        let mut game = Game::skeleton(&dir.mkdir("games/SomeGame"));
+        game.title = "SomeGame".into();
         game.resolved = Some(Resolved {
-            target: "/g/celeste".into(),
+            target: "/g/somegame".into(),
             start_in: "/g".into(),
             ..Default::default()
         });
-        let appid = generate_appid("Celeste", "/g/celeste");
+        let appid = generate_appid("SomeGame", "/g/somegame");
         let mut owner = Owner {
             tag: "cartridge:1".into(),
             label: "Potato-games".into(),
@@ -395,7 +395,7 @@ mod tests {
 
         assert_eq!(export(&owner, &game), (1, 0));
         assert_eq!(export(&owner, &game), (0, 0));
-        game.title = "Celeste DX".into();
+        game.title = "SomeGame DX".into();
         assert_eq!(export(&owner, &game), (0, 1));
         // Renaming the cartridge folder updates the visible tag, same shortcut.
         owner.label = "Potatoes".into();
@@ -416,14 +416,14 @@ mod tests {
     fn a_renamed_game_keeps_its_stored_appid() {
         let dir = TempDir::new();
         let config_dir = dir.mkdir("userdata/1/config");
-        let mut game = Game::skeleton(&dir.mkdir("games/Celeste"));
+        let mut game = Game::skeleton(&dir.mkdir("games/SomeGame"));
         game.resolved = Some(Resolved {
-            target: "/g/celeste".into(),
+            target: "/g/somegame".into(),
             ..Default::default()
         });
         game.steam_appid = appid_of(&game);
         let before = game.steam_appid.unwrap();
-        game.title = "Celeste DX".into();
+        game.title = "SomeGame DX".into();
         assert_eq!(appid_of(&game), Some(before));
 
         let owner = Owner {
@@ -434,16 +434,16 @@ mod tests {
         let saved = load_shortcuts(&shortcuts_path(&config_dir)).unwrap();
         let entry = as_shortcut(saved.values().next().unwrap()).unwrap();
         assert_eq!(entry.get_int("appid"), Some(i64::from(signed32(before))));
-        assert_eq!(appname(entry), "Celeste DX");
+        assert_eq!(appname(entry), "SomeGame DX");
     }
 
     #[test]
     fn export_updates_a_changed_start_folder() {
         let dir = TempDir::new();
         let config_dir = dir.mkdir("userdata/1/config");
-        let mut game = Game::skeleton(&dir.mkdir("games/Celeste"));
+        let mut game = Game::skeleton(&dir.mkdir("games/SomeGame"));
         game.resolved = Some(Resolved {
-            target: "/g/celeste".into(),
+            target: "/g/somegame".into(),
             start_in: "/g".into(),
             ..Default::default()
         });
@@ -451,7 +451,7 @@ mod tests {
             tag: "cartridge:1".into(),
             label: "games".into(),
         };
-        let appid = generate_appid(&game.title, "/g/celeste");
+        let appid = generate_appid(&game.title, "/g/somegame");
         export_to_user(&config_dir, &[(&game, appid)], &owner).unwrap();
 
         game.resolved.as_mut().unwrap().start_in = "/g/bin".into();
@@ -468,15 +468,15 @@ mod tests {
     fn windows_shortcuts_carry_the_game_environment() {
         let dir = TempDir::new();
         let config_dir = dir.mkdir("userdata/1/config");
-        let mut game = Game::skeleton(&dir.mkdir("games/Rayman"));
-        game.title = "Rayman".into();
+        let mut game = Game::skeleton(&dir.mkdir("games/WinGame"));
+        game.title = "WinGame".into();
         game.resolved = Some(Resolved {
-            target: "/g/rayman.exe".into(),
+            target: "/g/wingame.exe".into(),
             start_in: "/g".into(),
             launch_options: "-w".into(),
             os: "windows".into(),
         });
-        let appid = generate_appid("Rayman", "/g/rayman.exe");
+        let appid = generate_appid("WinGame", "/g/wingame.exe");
         let owner = Owner {
             tag: "cartridge:1".into(),
             label: "games".into(),
@@ -503,14 +503,14 @@ mod tests {
     fn launch_options_set_in_steam_survive_updates() {
         let dir = TempDir::new();
         let config_dir = dir.mkdir("userdata/1/config");
-        let mut game = Game::skeleton(&dir.mkdir("games/Celeste"));
-        game.title = "Celeste".into();
+        let mut game = Game::skeleton(&dir.mkdir("games/SomeGame"));
+        game.title = "SomeGame".into();
         game.resolved = Some(Resolved {
-            target: "/g/celeste".into(),
+            target: "/g/somegame".into(),
             start_in: "/g".into(),
             ..Default::default()
         });
-        let appid = generate_appid("Celeste", "/g/celeste");
+        let appid = generate_appid("SomeGame", "/g/somegame");
         let owner = Owner {
             tag: "cartridge:1".into(),
             label: "games".into(),
@@ -527,7 +527,7 @@ mod tests {
             export_to_user(&config_dir, &[(&game, appid)], &owner).unwrap(),
             (0, 0)
         );
-        game.title = "Celeste DX".into();
+        game.title = "SomeGame DX".into();
         assert_eq!(
             export_to_user(&config_dir, &[(&game, appid)], &owner).unwrap(),
             (0, 1)

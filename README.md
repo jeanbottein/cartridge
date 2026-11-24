@@ -25,7 +25,7 @@ Potato-games/          # any name: the cartridge's label
 
 - **Autonomous** — no button to press: at launch, and whenever a folder or a `.cartridge.tar` lands in (or leaves) `games/`, the app processes it once the copy is done
 - **Scan** — discovers game folders and loads existing metadata
-- **Detect** — auto-detects executables when metadata is missing
+- **Detect** — auto-detects executables when metadata is missing: native programs, `.exe` files, macOS `.app` bundles and launcher scripts (`#!`), one target per OS and arch, the same whichever machine scans (each picks its own at launch). OS and arch come from the file itself (ELF → Linux, Mach-O → macOS, universal → any arch); a script's from its path (`game-linux-amd64/`), else from the programs beside it, else Linux on any arch. The game editor's detect adds targets found later
 - **SteamGridDB integration, out of the box** — fetches official names and artwork from [SteamGridDB](https://www.steamgriddb.com/); release builds embed an API key, so there's nothing to set up (your own key in `config.txt` overrides it)
 - **Steam shortcuts** — adds games, or the cartridge itself, to Steam as non-Steam shortcuts, complete with artwork, and sets Proton for Windows games
 - **Proton support** — plays Windows games on Linux with Steam's own Proton, in the same prefix as their Steam shortcut
@@ -78,7 +78,7 @@ On Linux, Windows games start from the app with the Proton builds Steam installe
 2. Extract it where you want your cartridge. You get a ready-made `Cartridge/` folder (rename it: that's its label) holding the app (`Cartridge.AppImage`, `Cartridge.app` or `cartridge.exe`), an empty `system/`, `games/`, `mods/` and `saves-copies/`. Keep the app inside that folder: it looks for `system/` right next to itself. To put a folder elsewhere, replace it with a symbolic link.
 3. Launch the app (first launch creates `system/config.txt`). If it won't start:
    - **Linux / Steam Deck:** make the AppImage executable (`chmod +x Cartridge.AppImage`), and don't let an AppImage manager (Gear Lever, AppImageLauncher) move it out of the folder.
-   - **macOS:** the app isn't notarized. Right-click `Cartridge.app` > Open; if it says it runs from a temporary copy, run `xattr -dr com.apple.quarantine /path/to/Cartridge` once.
+   - **macOS:** the app isn't notarized. Right-click `Cartridge.app` > Open; if it says it runs from a temporary copy (it can't write its folder), quit, drag `Cartridge.app` out of its folder and back in with Finder, then open it again. In Desktop, Documents or Downloads, allow it in System Settings > Privacy & Security > Files and Folders, or keep the cartridge elsewhere.
    - **Windows:** on the SmartScreen warning, More info > Run anyway.
 4. Drop your games into `games/` (each in its own folder): they show up in the Library by themselves. Adjust the settings in the UI, or in `system/config.txt`.
 

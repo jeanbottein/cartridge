@@ -20,6 +20,7 @@ pub mod persister;
 pub mod pipeline;
 pub mod platform;
 pub mod proton;
+pub mod removal;
 // Not built for now: the links tree waits for its own rework.
 #[allow(dead_code)]
 pub mod save_links;

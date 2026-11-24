@@ -98,6 +98,18 @@ fn is_writable(dir: &Path) -> bool {
     ok
 }
 
+#[cfg(target_os = "macos")]
+fn not_writable_advice() -> &'static str {
+    "This folder can't be written. Desktop, Documents and Downloads need a permission: \
+     System Settings > Privacy & Security > Files and Folders, or use a folder elsewhere \
+     (e.g. Games/ in your home folder)."
+}
+
+#[cfg(not(target_os = "macos"))]
+fn not_writable_advice() -> &'static str {
+    "This folder can't be written: move the app to a folder of its own."
+}
+
 /// What to tell the user before creating a cartridge in `dir`: the portable
 /// idea, plus warnings when `dir` is a poor home for a cartridge.
 pub fn folder_advice(dir: &Path) -> Vec<String> {
@@ -116,11 +128,11 @@ pub fn folder_advice(dir: &Path) -> Vec<String> {
     if launched.as_deref().is_some_and(is_translocated) {
         advice.push(format!(
             "macOS runs {DISPLAY_NAME} from a temporary read-only copy, away from its \
-             folder. Quit, move the app into its folder with Finder (or run \
-             `xattr -dr com.apple.quarantine` on that folder), then open it again."
+             folder. Quit, then in Finder drag the app out of its folder and back in \
+             (macOS trusts an app moved by hand), and open it again."
         ));
     } else if dir.exists() && !is_writable(dir) {
-        advice.push("This folder can't be written: move the app to a folder of its own.".into());
+        advice.push(not_writable_advice().into());
     }
     if is_appimage && app_here.is_some() && is_appimage_manager_dir(dir) {
         advice.push(

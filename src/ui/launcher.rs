@@ -186,7 +186,7 @@ mod tests {
 
     #[test]
     fn a_cancelled_launch_is_not_an_error() {
-        let session = Session::new("Rayman", Arc::default());
+        let session = Session::new("WinGame", Arc::default());
         set(&session.error, Some(CANCELLED.into()));
         assert!(session.cancelled());
         assert_eq!(session.error(), None);

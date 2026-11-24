@@ -725,7 +725,7 @@ mod tests {
     use crate::core::models::Target;
     use crate::core::testutil::TempDir;
 
-    fn banjo() -> Release {
+    fn example_release() -> Release {
         parse_release(include_str!("../../testdata/github_release.json")).unwrap()
     }
 
@@ -797,19 +797,19 @@ mod tests {
 
     #[test]
     fn an_appimage_is_a_linux_x64_build() {
-        let soh = release(&[
-            "SoH-Dewey-Bravo-Mac.zip",
-            "SoH-Dewey-Bravo-Win64.zip",
-            "SoH-Dewey-Bravo.appimage",
+        let port = release(&[
+            "Port-Alpha-Bravo-Mac.zip",
+            "Port-Alpha-Bravo-Win64.zip",
+            "Port-Alpha-Bravo.appimage",
         ]);
         assert_eq!(
-            picked_for(&soh, "soh.AppImage").unwrap(),
-            "SoH-Dewey-Bravo.appimage"
+            picked_for(&port, "port.AppImage").unwrap(),
+            "Port-Alpha-Bravo.appimage"
         );
-        assert_eq!(picked(&soh, "linux", "arm64", ""), None);
+        assert_eq!(picked(&port, "linux", "arm64", ""), None);
         assert_eq!(
-            picked(&soh, "windows", "x64", "").unwrap(),
-            "SoH-Dewey-Bravo-Win64.zip"
+            picked(&port, "windows", "x64", "").unwrap(),
+            "Port-Alpha-Bravo-Win64.zip"
         );
     }
 
@@ -830,17 +830,20 @@ mod tests {
     fn a_program_file_replaces_the_executable_and_nothing_else() {
         let dir = TempDir::new();
         let game = installed_game(&dir);
-        dir.write("games/Banjo/soh.AppImage", b"old");
+        dir.write("games/Example/port.AppImage", b"old");
         let file = dir.write("new.part", b"new appimage");
-        replace_program(&file, &game.dir, "./soh.AppImage").unwrap();
+        replace_program(&file, &game.dir, "./port.AppImage").unwrap();
         assert_eq!(
-            fs::read(game.dir.join("soh.AppImage")).unwrap(),
+            fs::read(game.dir.join("port.AppImage")).unwrap(),
             b"new appimage"
         );
         assert!(platform::has_exec_permission(
-            &game.dir.join("soh.AppImage")
+            &game.dir.join("port.AppImage")
         ));
-        assert_eq!(fs::read(game.dir.join("saves/bk.bin")).unwrap(), b"my save");
+        assert_eq!(
+            fs::read(game.dir.join("saves/slot1.bin")).unwrap(),
+            b"my save"
+        );
     }
 
     #[test]
@@ -855,11 +858,11 @@ mod tests {
 
     #[test]
     fn api_url_comes_from_any_page_of_the_project() {
-        let api = "https://api.github.com/repos/BanjoRecomp/BanjoRecomp/releases/latest";
+        let api = "https://api.github.com/repos/ExampleRecomp/ExampleRecomp/releases/latest";
         for page in [
-            "https://github.com/BanjoRecomp/BanjoRecomp/releases/latest",
-            "github.com/BanjoRecomp/BanjoRecomp",
-            "https://www.github.com/BanjoRecomp/BanjoRecomp/",
+            "https://github.com/ExampleRecomp/ExampleRecomp/releases/latest",
+            "github.com/ExampleRecomp/ExampleRecomp",
+            "https://www.github.com/ExampleRecomp/ExampleRecomp/",
         ] {
             assert_eq!(api_url(page).as_deref(), Ok(api), "{page}");
         }
@@ -869,7 +872,7 @@ mod tests {
 
     #[test]
     fn parses_a_github_release() {
-        let release = banjo();
+        let release = example_release();
         assert_eq!(release.tag, "v1.0.2");
         assert_eq!(release.date, "2026-07-31");
         assert_eq!(release.assets.len(), 5);
@@ -879,7 +882,7 @@ mod tests {
 
     #[test]
     fn a_file_is_fingerprinted_by_its_digest_else_its_upload_date() {
-        let release = banjo();
+        let release = example_release();
         assert!(release.assets[0].build.starts_with("sha256:53515be8"));
         let json = r#"{"tag_name": "nightly", "published_at": "2024-05-14T09:41:23Z",
             "created_at": "2026-08-13T05:51:05Z",
@@ -914,67 +917,67 @@ mod tests {
 
     #[test]
     fn picks_the_archive_for_the_os_and_arch() {
-        let release = banjo();
+        let release = example_release();
         let name = |os, arch| picked(&release, os, arch, "");
         assert_eq!(
             name("linux", "x64").unwrap(),
-            "BanjoRecompiled-v1.0.2-Linux-X64.tar.gz"
+            "ExampleRecompiled-v1.0.2-Linux-X64.tar.gz"
         );
         assert_eq!(
             name("linux", "arm64").unwrap(),
-            "BanjoRecompiled-v1.0.2-Linux-ARM64.tar.gz"
+            "ExampleRecompiled-v1.0.2-Linux-ARM64.tar.gz"
         );
         assert_eq!(
             name("windows", "x64").unwrap(),
-            "BanjoRecompiled-v1.0.2-Windows.zip"
+            "ExampleRecompiled-v1.0.2-Windows.zip"
         );
         assert_eq!(
             name("macos", "arm64").unwrap(),
-            "BanjoRecompiled-v1.0.2-macOS.zip"
+            "ExampleRecompiled-v1.0.2-macOS.zip"
         );
     }
 
     #[test]
     fn picks_the_linux_build_of_real_releases() {
-        let starfox = release(&[
-            "SF64Recomp-Dev-Cheats.zip",
-            "Starfox64Recompiled-v1.0.3-Flatpak-X64-Release.zip",
-            "Starfox64Recompiled-v1.0.3-Linux-ARM64-Release.zip",
-            "Starfox64Recompiled-v1.0.3-Linux-X64-Release.zip",
-            "Starfox64Recompiled-v1.0.3-Windows-RelWithDebInfo.zip",
+        let space = release(&[
+            "SpaceRecomp-Dev-Cheats.zip",
+            "SpaceRecompiled-v1.0.3-Flatpak-X64-Release.zip",
+            "SpaceRecompiled-v1.0.3-Linux-ARM64-Release.zip",
+            "SpaceRecompiled-v1.0.3-Linux-X64-Release.zip",
+            "SpaceRecompiled-v1.0.3-Windows-RelWithDebInfo.zip",
         ]);
         assert_eq!(
-            picked(&starfox, "linux", "x64", "").unwrap(),
-            "Starfox64Recompiled-v1.0.3-Linux-X64-Release.zip"
+            picked(&space, "linux", "x64", "").unwrap(),
+            "SpaceRecompiled-v1.0.3-Linux-X64-Release.zip"
         );
-        let perfect_dark = release(&[
-            "io.github.perfect_dark_pc_port.perfect_dark.flatpak",
-            "pd-arm64-osx.tar.xz",
-            "pd-i686-linux.tar.gz",
-            "pd-i686-windows.zip",
-            "pd-x86_64-linux.tar.gz",
+        let fps = release(&[
+            "io.github.fps_pc_port.fps.flatpak",
+            "fps-arm64-osx.tar.xz",
+            "fps-i686-linux.tar.gz",
+            "fps-i686-windows.zip",
+            "fps-x86_64-linux.tar.gz",
         ]);
         assert_eq!(
-            picked(&perfect_dark, "linux", "x64", "").unwrap(),
-            "pd-x86_64-linux.tar.gz"
+            picked(&fps, "linux", "x64", "").unwrap(),
+            "fps-x86_64-linux.tar.gz"
         );
-        let midas = release(&[
-            "ProjectMidas-v1.0.2b-linux.zip",
-            "ProjectMidas-v1.0.2b-steamdeck.zip",
-            "ProjectMidas-v1.0.2b-windows.zip",
+        let spy = release(&[
+            "ProjectSpy-v1.0.2b-linux.zip",
+            "ProjectSpy-v1.0.2b-steamdeck.zip",
+            "ProjectSpy-v1.0.2b-windows.zip",
         ]);
         assert_eq!(
-            picked(&midas, "linux", "x64", "").unwrap(),
-            "ProjectMidas-v1.0.2b-linux.zip"
+            picked(&spy, "linux", "x64", "").unwrap(),
+            "ProjectSpy-v1.0.2b-linux.zip"
         );
     }
 
     #[test]
     fn a_pattern_picks_the_file_by_name() {
-        let release = banjo();
+        let release = example_release();
         assert_eq!(
             picked(&release, "linux", "x64", "arm64").unwrap(),
-            "BanjoRecompiled-v1.0.2-Linux-ARM64.tar.gz"
+            "ExampleRecompiled-v1.0.2-Linux-ARM64.tar.gz"
         );
         assert_eq!(picked(&release, "linux", "x64", "nothing like it"), None);
     }
@@ -1035,13 +1038,13 @@ mod tests {
 
     /// A game folder with user files next to the game's own.
     fn installed_game(dir: &TempDir) -> Game {
-        dir.write("games/Banjo/BanjoRecompiled", b"old binary");
-        dir.write("games/Banjo/assets/old.svg", b"old");
-        dir.write("games/Banjo/saves/bk.bin", b"my save");
-        dir.write("games/Banjo/rom.z64", b"rom");
-        let mut game = Game::skeleton(&dir.path().join("games/Banjo"));
+        dir.write("games/Example/ExampleRecompiled", b"old binary");
+        dir.write("games/Example/assets/old.svg", b"old");
+        dir.write("games/Example/saves/slot1.bin", b"my save");
+        dir.write("games/Example/rom.z64", b"rom");
+        let mut game = Game::skeleton(&dir.path().join("games/Example"));
         game.size = Some(42);
-        game.update.url = "https://github.com/BanjoRecomp/BanjoRecomp".into();
+        game.update.url = "https://github.com/ExampleRecomp/ExampleRecomp".into();
         crate::core::persister::write_game_json(&mut game).unwrap();
         game
     }
@@ -1050,16 +1053,16 @@ mod tests {
     fn upsert_replaces_and_adds_files_and_deletes_none() {
         let dir = TempDir::new();
         let game = installed_game(&dir);
-        dir.write("new/BanjoRecompiled", b"new binary");
+        dir.write("new/ExampleRecompiled", b"new binary");
         dir.write("new/assets/new.svg", b"new");
         dir.write("new/.cartridge/game.json", b"{}");
         let written = upsert(&dir.path().join("new"), &game.dir).unwrap();
         assert_eq!(written, 2);
         let read = |rel: &str| fs::read(game.dir.join(rel)).unwrap();
-        assert_eq!(read("BanjoRecompiled"), b"new binary");
+        assert_eq!(read("ExampleRecompiled"), b"new binary");
         assert_eq!(read("assets/new.svg"), b"new");
         assert_eq!(read("assets/old.svg"), b"old");
-        assert_eq!(read("saves/bk.bin"), b"my save");
+        assert_eq!(read("saves/slot1.bin"), b"my save");
         assert_eq!(read("rom.z64"), b"rom");
         assert_ne!(read(".cartridge/game.json"), b"{}");
     }
@@ -1068,12 +1071,15 @@ mod tests {
     fn upsert_refuses_a_file_over_a_folder_before_writing_anything() {
         let dir = TempDir::new();
         let game = installed_game(&dir);
-        dir.write("new/BanjoRecompiled", b"new binary");
+        dir.write("new/ExampleRecompiled", b"new binary");
         dir.write("new/saves", b"not a folder");
         assert!(upsert(&dir.path().join("new"), &game.dir).is_err());
-        assert_eq!(fs::read(game.dir.join("saves/bk.bin")).unwrap(), b"my save");
         assert_eq!(
-            fs::read(game.dir.join("BanjoRecompiled")).unwrap(),
+            fs::read(game.dir.join("saves/slot1.bin")).unwrap(),
+            b"my save"
+        );
+        assert_eq!(
+            fs::read(game.dir.join("ExampleRecompiled")).unwrap(),
             b"old binary"
         );
     }
@@ -1103,15 +1109,15 @@ mod tests {
     fn macos_junk_is_neither_the_content_nor_installed() {
         let dir = TempDir::new();
         let game = installed_game(&dir);
-        dir.write("x/Banjo-v2/BanjoRecompiled", b"new");
-        dir.write("x/__MACOSX/Banjo-v2/._BanjoRecompiled", b"fork");
+        dir.write("x/Example-v2/ExampleRecompiled", b"new");
+        dir.write("x/__MACOSX/Example-v2/._ExampleRecompiled", b"fork");
         let extracted = dir.path().join("x");
         assert_eq!(
             content_root(&extracted, &game.dir).unwrap(),
-            extracted.join("Banjo-v2")
+            extracted.join("Example-v2")
         );
-        dir.write("y/BanjoRecompiled", b"new");
-        dir.write("y/__MACOSX/._BanjoRecompiled", b"fork");
+        dir.write("y/ExampleRecompiled", b"new");
+        dir.write("y/__MACOSX/._ExampleRecompiled", b"fork");
         upsert(&dir.path().join("y"), &game.dir).unwrap();
         assert!(!game.dir.join("__MACOSX").exists());
     }
@@ -1120,11 +1126,11 @@ mod tests {
     fn a_single_top_folder_is_the_content_unless_the_game_has_one_like_it() {
         let dir = TempDir::new();
         let game = installed_game(&dir);
-        dir.write("x/Banjo-v2/BanjoRecompiled", b"new");
+        dir.write("x/Example-v2/ExampleRecompiled", b"new");
         let extracted = dir.path().join("x");
         assert_eq!(
             content_root(&extracted, &game.dir).unwrap(),
-            extracted.join("Banjo-v2")
+            extracted.join("Example-v2")
         );
         dir.write("y/assets/new.svg", b"new");
         let only_assets = dir.path().join("y");
@@ -1268,27 +1274,27 @@ mod tests {
 
     #[test]
     fn a_zipped_appimage_replaces_the_executable_even_in_a_folder() {
-        for zipped in ["SoH-v2.AppImage", "SoH-v2/SoH-v2.AppImage"] {
+        for zipped in ["Port-v2.AppImage", "Port-v2/Port-v2.AppImage"] {
             let dir = TempDir::new();
             let game = installed_game(&dir);
-            dir.write("games/Banjo/soh.AppImage", b"old");
+            dir.write("games/Example/port.AppImage", b"old");
             let archive = dir.write("a.zip", &zip_of(zipped, b"new appimage"));
             let (outer, inner) = (dir.path().join("outer"), dir.path().join("inner"));
             let written = lay_archive(
                 Archive::Zip,
                 &archive,
-                (&game.dir, "soh.AppImage"),
+                (&game.dir, "port.AppImage"),
                 (&outer, &inner),
                 &Progress::default(),
             )
             .unwrap();
             assert_eq!(written, 1, "{zipped}");
             assert_eq!(
-                fs::read(game.dir.join("soh.AppImage")).unwrap(),
+                fs::read(game.dir.join("port.AppImage")).unwrap(),
                 b"new appimage",
                 "{zipped}"
             );
-            assert!(!game.dir.join("SoH-v2.AppImage").exists(), "{zipped}");
+            assert!(!game.dir.join("Port-v2.AppImage").exists(), "{zipped}");
         }
     }
 
@@ -1296,7 +1302,7 @@ mod tests {
     fn a_zipped_appimage_is_laid_as_a_file_when_the_target_is_no_appimage() {
         let dir = TempDir::new();
         let game = installed_game(&dir);
-        dir.write("games/Banjo/run.sh", b"./Game.AppImage");
+        dir.write("games/Example/run.sh", b"./Game.AppImage");
         let archive = dir.write("a.zip", &zip_of("Game.AppImage", b"new appimage"));
         let (outer, inner) = (dir.path().join("outer"), dir.path().join("inner"));
         lay_archive(
@@ -1319,7 +1325,7 @@ mod tests {
 
     #[test]
     fn a_32_bit_build_is_not_an_x64_build() {
-        let release = release(&["pd-i686-linux.tar.gz", "pd-armhf-linux.tar.gz"]);
+        let release = release(&["fps-i686-linux.tar.gz", "pd-armhf-linux.tar.gz"]);
         assert_eq!(picked(&release, "linux", "x64", ""), None);
         assert_eq!(picked(&release, "linux", "arm64", ""), None);
     }
@@ -1357,11 +1363,11 @@ mod tests {
     fn marking_a_release_installed_keeps_the_rest_of_game_json() {
         let dir = TempDir::new();
         let game = installed_game(&dir);
-        mark_installed(&game, "v1.0.2", Some(&asset("Banjo.tar.gz"))).unwrap();
+        mark_installed(&game, "v1.0.2", Some(&asset("Example.tar.gz"))).unwrap();
         let text = fs::read_to_string(game.game_json_path()).unwrap();
         let back = Game::from_json(&game.dir, &text).unwrap();
         assert_eq!(back.update.installed, "v1.0.2");
-        assert_eq!(back.update.build, "sha256:Banjo.tar.gz");
+        assert_eq!(back.update.build, "sha256:Example.tar.gz");
         assert_eq!(back.update.url, game.update.url);
         assert_eq!(back.size, Some(42));
     }

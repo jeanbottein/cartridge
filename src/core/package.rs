@@ -718,13 +718,13 @@ mod tests {
     use crate::core::testutil::TempDir;
 
     fn sample_game(dir: &TempDir) -> Game {
-        let root = dir.mkdir("games/Celeste");
-        dir.write("games/Celeste/Celeste.bin", b"binary");
-        dir.write("games/Celeste/Content/level.dat", &[7u8; 3000]);
+        let root = dir.mkdir("games/SomeGame");
+        dir.write("games/SomeGame/SomeGame.bin", b"binary");
+        dir.write("games/SomeGame/Content/level.dat", &[7u8; 3000]);
         let mut game = Game::skeleton(&root);
-        game.title = "Celeste".into();
+        game.title = "SomeGame".into();
         dir.write(
-            &format!("games/Celeste/{GAME_DATA_DIR}/{GAME_JSON}"),
+            &format!("games/SomeGame/{GAME_DATA_DIR}/{GAME_JSON}"),
             game.to_json().as_bytes(),
         );
         game
@@ -732,7 +732,7 @@ mod tests {
 
     fn packed(dir: &TempDir) -> (Game, PathBuf, Manifest) {
         let game = sample_game(dir);
-        let package = dir.path().join("out").join(format!("Celeste{EXTENSION}"));
+        let package = dir.path().join("out").join(format!("SomeGame{EXTENSION}"));
         fs::create_dir_all(package.parent().unwrap()).unwrap();
         let manifest = pack(&game, &package, &Progress::default()).unwrap();
         (game, package, manifest)
@@ -762,11 +762,11 @@ mod tests {
     #[test]
     fn unpacking_keeps_a_newer_apps_game_json_as_it_is() {
         let dir = TempDir::new();
-        let body = br#"{"schema_version": 99, "title": "Celeste", "future": true}"#;
+        let body = br#"{"schema_version": 99, "title": "SomeGame", "future": true}"#;
         sample_game(&dir);
-        dir.write(&format!("games/Celeste/{GAME_DATA_DIR}/{GAME_JSON}"), body);
+        dir.write(&format!("games/SomeGame/{GAME_DATA_DIR}/{GAME_JSON}"), body);
         let game = crate::core::scanner::load_library(&dir.path().join("games")).remove(0);
-        let package = dir.path().join(format!("Celeste{EXTENSION}"));
+        let package = dir.path().join(format!("SomeGame{EXTENSION}"));
         pack(&game, &package, &Progress::default()).unwrap();
         let dest = unpack(&package, &dir.mkdir("target"), &Progress::default()).unwrap();
         assert_eq!(
@@ -781,7 +781,7 @@ mod tests {
         let (_, package, manifest) = packed(&dir);
         let (read, game_json) = read_meta(&package).unwrap();
         assert_eq!(read, manifest);
-        assert!(game_json.unwrap().contains("\"Celeste\""));
+        assert!(game_json.unwrap().contains("\"SomeGame\""));
         assert!(read_data_file(&package, GAME_JSON).is_some());
         assert!(read_data_file(&package, "cover.png").is_none());
     }
@@ -807,7 +807,7 @@ mod tests {
         let target = dir.mkdir("target");
         let cut = &bytes[..bytes.len() / 2];
         assert!(unpack_from(cut, &target, None, &Progress::default()).is_err());
-        assert!(!target.join("Celeste").exists());
+        assert!(!target.join("SomeGame").exists());
     }
 
     #[test]
@@ -821,7 +821,7 @@ mod tests {
 
         assert!(unpack(Some("Other")).unwrap_err().contains("Other"));
         assert!(fs::read_dir(&target).unwrap().next().is_none());
-        assert!(unpack(Some("Celeste")).is_ok());
+        assert!(unpack(Some("SomeGame")).is_ok());
     }
 
     #[test]
@@ -865,20 +865,20 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = TempDir::new();
         let game = sample_game(&dir);
-        set_mode(&game.dir.join("Celeste.bin"), 0o755).unwrap();
-        make_symlink(Path::new("Celeste.bin"), &game.dir.join("run")).unwrap();
+        set_mode(&game.dir.join("SomeGame.bin"), 0o755).unwrap();
+        make_symlink(Path::new("SomeGame.bin"), &game.dir.join("run")).unwrap();
         let mut tar = Vec::new();
         pack_to(&game, &mut tar, &Progress::default()).unwrap();
         let target = dir.mkdir("target");
         let dest = unpack_from(tar.as_slice(), &target, None, &Progress::default()).unwrap();
-        let mode = fs::metadata(dest.join("Celeste.bin"))
+        let mode = fs::metadata(dest.join("SomeGame.bin"))
             .unwrap()
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o755);
         assert_eq!(
             fs::read_link(dest.join("run")).unwrap(),
-            Path::new("Celeste.bin")
+            Path::new("SomeGame.bin")
         );
     }
 
@@ -908,7 +908,7 @@ mod tests {
         let items = walk(&dest).unwrap();
         assert!(items.iter().any(|i| is_generated(&i.rel)));
         let mut game = Game::skeleton(&dest);
-        game.title = "Celeste".into();
+        game.title = "SomeGame".into();
         let mut tar = Vec::new();
         let manifest = pack_to(&game, &mut tar, &Progress::default()).unwrap();
         assert_eq!(manifest.files, 3);

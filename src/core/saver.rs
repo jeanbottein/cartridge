@@ -490,10 +490,7 @@ mod tests {
 
     #[test]
     fn sanitize_title_is_filesystem_safe() {
-        assert_eq!(
-            sanitize_title("Hollow Knight: Silksong?"),
-            "Hollow_Knight__Silksong_"
-        );
+        assert_eq!(sanitize_title("Other Game: Sequel?"), "Other_Game__Sequel_");
         assert_eq!(sanitize_title("  CON "), "CON_game");
         assert_eq!(sanitize_title("..."), "game");
         assert_eq!(sanitize_title("a.  "), "a");
