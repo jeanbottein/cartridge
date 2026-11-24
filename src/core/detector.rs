@@ -302,10 +302,17 @@ fn make_target(os: &str, arch: &str, exe: &Path, game_dir: &Path) -> Target {
 /// are targets only in a game without any program (a Java game's start
 /// script).
 fn launches_one_of(script: &Path, program_names: &[String]) -> bool {
-    std::fs::read_to_string(script).is_ok_and(|text| {
-        program_names
-            .iter()
-            .any(|name| text.contains(name.as_str()))
+    std::fs::read_to_string(script).is_ok_and(|text| names_a_program(&text, program_names))
+}
+
+/// A program name standing on its own in `text`: what glues to it (letters,
+/// digits, `_`, `-`, `.`) makes another word, `game` in `game-data`.
+fn names_a_program(text: &str, program_names: &[String]) -> bool {
+    let glues = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || "_-.".contains(c));
+    program_names.iter().any(|name| {
+        text.match_indices(name.as_str()).any(|(at, _)| {
+            !glues(text[..at].chars().next_back()) && !glues(text[at + name.len()..].chars().next())
+        })
     })
 }
 
@@ -833,6 +840,38 @@ mod tests {
         let targets = collect_targets(&game);
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].target, "Game.x86_64");
+    }
+
+    /// A short program name inside a longer word or path is no launch.
+    #[cfg(unix)]
+    #[test]
+    fn a_script_naming_the_program_inside_a_path_is_no_launcher() {
+        let dir = TempDir::new();
+        let game = dir.mkdir("Some Game");
+        make_exec(&dir.write("Some Game/game", &elf()));
+        make_exec(&dir.write(
+            "Some Game/install.sh",
+            b"#!/bin/sh\nmkdir -p ~/.local/share/game-data\ncp -r . ~/games\n",
+        ));
+        assert_eq!(collect_targets(&game)[0].target, "game");
+
+        make_exec(&dir.write("Some Game/start.sh", b"#!/bin/sh\nexec \"./game\" \"$@\"\n"));
+        assert_eq!(collect_targets(&game)[0].target, "start.sh");
+    }
+
+    #[test]
+    fn a_program_is_named_when_nothing_glues_to_its_name() {
+        let names = ["Game.x86_64".to_string()];
+        for text in [
+            "./Game.x86_64 $@",
+            "exec \"$DIR/Game.x86_64\"",
+            "Game.x86_64",
+        ] {
+            assert!(names_a_program(text, &names), "{text}");
+        }
+        for text in ["./Game.x86_64-old", "MyGame.x86_64", "Game.x86_64.bak"] {
+            assert!(!names_a_program(text, &names), "{text}");
+        }
     }
 
     /// Copies from exFAT mark every file executable: Unity's managed DLLs

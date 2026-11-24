@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use super::models::{Game, ImageSlot};
-use super::{package, persister};
+use super::{package, paths, persister};
 
 /// Forget what `game.json` holds, and the artwork downloaded for it, so the
 /// next run detects the program and fetches the metadata again. The AppID
@@ -38,16 +38,50 @@ fn remove_image(path: PathBuf) {
 }
 
 /// Take a game folder out of the library at once: renamed to a hidden
-/// staging name (which the scanner skips), for [`std::fs::remove_dir_all`]
-/// to delete in the background. Returns the staged path.
+/// staging name (which the scanner skips), for [`remove_in_background`].
+/// Each gets its own name, so a game copied back can be deleted again while
+/// the first copy is still going. Returns the staged path.
 pub fn stage_for_deletion(game_dir: &Path) -> std::io::Result<PathBuf> {
     let name = game_dir
         .file_name()
         .ok_or_else(|| std::io::Error::other("not a game folder"))?
         .to_string_lossy();
-    let staged = game_dir.with_file_name(package::staging_name(&format!("{name}.deleted")));
-    std::fs::rename(game_dir, &staged)?;
-    Ok(staged)
+    let free = (0..)
+        .map(|n| game_dir.with_file_name(package::staging_name(&format!("{name}{DELETED}{n}"))))
+        .find(|staged| !staged.exists())
+        .expect("a free name");
+    std::fs::rename(game_dir, &free)?;
+    Ok(free)
+}
+
+/// What sets a staged deletion apart from other staging names.
+const DELETED: &str = ".deleted-";
+
+/// Staged deletions still in `games_dir`: the app quit before it finished
+/// removing them.
+pub fn leftovers(games_dir: &Path) -> Vec<PathBuf> {
+    paths::sorted_entries(games_dir)
+        .into_iter()
+        .filter(|name| name.starts_with('.') && name.ends_with(".part") && name.contains(DELETED))
+        .map(|name| games_dir.join(name))
+        .filter(|path| path.is_dir())
+        .collect()
+}
+
+/// Delete these folders on a thread of their own: a big game on an SD card
+/// takes a while.
+pub fn remove_in_background(folders: Vec<PathBuf>) {
+    if folders.is_empty() {
+        return;
+    }
+    std::thread::spawn(move || {
+        for folder in folders {
+            match std::fs::remove_dir_all(&folder) {
+                Ok(()) => log::info!("Deleted {}", folder.display()),
+                Err(e) => log::error!("Cannot delete {}: {e}", folder.display()),
+            }
+        }
+    });
 }
 
 #[cfg(test)]
@@ -86,6 +120,29 @@ mod tests {
         assert_eq!(reset.steam_appid, Some(3_000_000_001));
         assert!(!cover.exists());
         assert!(outside.exists());
+    }
+
+    #[test]
+    fn a_game_copied_back_under_the_same_name_can_be_deleted_again() {
+        let dir = TempDir::new();
+        let game = dir.path().join("games/some-game");
+        dir.mkdir("games/some-game");
+        let first = stage_for_deletion(&game).unwrap();
+        dir.write("games/some-game/game.x86_64", b"elf");
+        let second = stage_for_deletion(&game).unwrap();
+        assert_ne!(first, second);
+        assert!(first.is_dir() && second.is_dir());
+    }
+
+    #[test]
+    fn leftovers_are_the_staged_deletions_only() {
+        let dir = TempDir::new();
+        let games_dir = dir.path().join("games");
+        let staged = stage_for_deletion(&dir.mkdir("games/some-game")).unwrap();
+        dir.mkdir("games/other-game");
+        dir.mkdir("games/.other-game.part");
+        dir.write("games/.unpacking.cartridge.tar.part", b"");
+        assert_eq!(leftovers(&games_dir), [staged]);
     }
 
     #[test]

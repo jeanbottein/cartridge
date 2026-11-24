@@ -200,6 +200,7 @@ impl App {
         // Upgrade old game.json formats before anything reads or edits them.
         if let Some(dir) = cfg.games_dir() {
             migrations::run_all(&dir);
+            removal::remove_in_background(removal::leftovers(&dir));
         }
         self.autopilot = Some(Autopilot::start(cfg.clone()));
         themes::seed(&cfg.system_dir());
@@ -664,11 +665,7 @@ impl App {
         match removal::stage_for_deletion(dir) {
             Ok(staged) => {
                 log::info!("Deleting {}", dir.display());
-                std::thread::spawn(move || {
-                    if let Err(e) = std::fs::remove_dir_all(&staged) {
-                        log::error!("Cannot delete {}: {e}", staged.display());
-                    }
-                });
+                removal::remove_in_background(vec![staged]);
                 self.library.toast.show("Game deleted.", theme::muted());
                 self.reload_library();
             }
