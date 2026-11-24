@@ -12,7 +12,7 @@ core::pipeline::Pipeline (one fixed sequence; each phase only does what is missi
                           steps 2-4 run per batch of 10 games, each batch written before the next)
  0. migrations::run_all      # Idempotent data migrations
  1. scanner::scan            # Parse .cartridge/game.json into Vec<Game>
- 2. detector::detect         # Fill missing targets (programs, .app, #! scripts; per os/arch, host-independent; a script only as the launcher of a native program, which then wins, or in a game with no program; a 64-bit build over its 32-bit twin; ELF libraries and .dll never), restore lost exec bits, clear exec-stack requests of Linux games' libraries (glibc 2.41+ refuses them)
+ 2. detector::detect         # Fill missing targets (programs, .app, #! scripts; per os/arch, host-independent; a script only as the launcher of a native program, which then wins, or in a game with no program; a 64-bit build over its 32-bit twin; "debug" in a path only when nothing else is there or the game's name says debug; ELF libraries and .dll never), restore lost exec bits, clear exec-stack requests of Linux games' libraries (glibc 2.41+ refuses them)
     sizer::measure           #   + size on disk into game.json (only when unknown: kept until reinstalled)
  3. sgdb::enrich             # SteamGridDB names/IDs/artwork (if API key)
  4. persister::persist       # Write game.json + download images, always in each game's .cartridge/
@@ -45,7 +45,7 @@ src/
     vdf.rs               # Binary (shortcuts.vdf) + text (config.vdf) KeyValues
     steam/               # users, selection (steam.json), host (detect/restart), shortcuts (vdf), clean, export, compat (Proton builds)
     steam_self.rs manifest.rs bps.rs
-    removal.rs           # editor: reset game.json (AppID kept) for a new detection + enrichment; delete a game (hidden staging rename, removed in the background)
+    removal.rs           # editor: reset game.json (AppID kept) for a new detection + enrichment; delete a game (hidden staging rename, removed in the background, leftovers swept at start; the UI takes it out of Steam too)
     saver.rs             # SAVES: saves-copies/<game folder>/<save folder>/; backup under a hidden name, renamed once complete; restore empties then copies
     save_links.rs        # optional saves-links/ symlink tree (not built for now; silent where links fail, folder only with a link)
     proton.rs            # Windows games with Steam's Proton + runtime, in the shortcut's compatdata prefix; winetricks
@@ -57,7 +57,7 @@ src/
   ui/                    # macroquad UI
     app.rs               # Shell: icon tabs (current one named), footer hints, game session lock, autopilot (paused while a game runs or the editor is open), warning toasts
     library.rs editor.rs settings.rs setup.rs   # launching or editing a game rereads its game.json first
-    kiosk.rs             # KIOSK_MODE off/on/strict: Library only, launch (+ quit when on); unlock by holding L1+R1+X (Q+E+X) 5 s
+    kiosk.rs             # KIOSK_MODE off/on/strict: Library only (installed games), launch (+ quit when on); unlock by holding L1+R1+X (Q+E+X) 5 s
     form.rs list.rs keyboard.rs browser.rs dialog.rs   # widgets
     network.rs jobs.rs info.rs   # Network tab, background transfers, shared info panel
     mods.rs              # MODS tab: mods with status, A turns one on/off

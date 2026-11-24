@@ -14,6 +14,7 @@ use super::engine::input::Action;
 use super::engine::theme;
 use super::info::{self, Info};
 use super::jobs::Jobs;
+use super::kiosk::{self, Level};
 use super::launcher::{self, Session};
 use super::style::{self, Toast};
 use super::{draw_spinner, Hint, Ui};
@@ -85,6 +86,7 @@ impl Snapshot {
             .games_dir()
             .map(|dir| scanner::load_library(&dir))
             .unwrap_or_default();
+        let games = kiosk::shown(games, Level::of(cfg.get(kiosk::KEY)));
         let package_sizes = games
             .iter()
             .map(|g| Some(std::fs::metadata(g.package()?).ok()?.len()))

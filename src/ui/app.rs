@@ -31,6 +31,7 @@ use crate::core::app::{debug_mode, exe_dir, find_system_dir};
 use crate::core::autopilot::Autopilot;
 use crate::core::config::{self, Config};
 use crate::core::logging::{self, Line};
+use crate::core::models::Game;
 use crate::core::share::{self, client, server::Server};
 use crate::core::{init, migrations};
 use crate::core::{package, removal, steam, steam_self, updater};
@@ -536,6 +537,7 @@ impl App {
         match config::update_file(&path, &off) {
             Ok(()) => {
                 self.reload_config();
+                self.reload_library(); // packaged games show again
                 self.library.toast.show("Kiosk mode off.", theme::accent());
             }
             Err(e) => self
@@ -642,7 +644,7 @@ impl App {
                 self.reload_config();
                 match key.as_str() {
                     "STEAM_ADD_SELF" => self.apply_self_shortcut(),
-                    "DEBUG_NO_STEAM" => self.reload_library(),
+                    "DEBUG_NO_STEAM" | kiosk::KEY => self.reload_library(),
                     "WIDESCREEN" => self.apply_widescreen(),
                     "THEME" => self.apply_theme(),
                     "WINDOW_MODE" => self.apply_window_mode(),
@@ -658,14 +660,14 @@ impl App {
         self.back_held_over = true;
     }
 
-    /// The game leaves the library at once; its files go in the background
-    /// (a big game on an SD card takes a while). The next run removes its
-    /// Steam shortcut.
-    fn delete_game(&mut self, dir: &std::path::Path) {
-        match removal::stage_for_deletion(dir) {
+    /// The game leaves Steam and the library at once; its files go in the
+    /// background (a big game on an SD card takes a while).
+    fn delete_game(&mut self, game: &Game) {
+        match removal::stage_for_deletion(&game.dir) {
             Ok(staged) => {
-                log::info!("Deleting {}", dir.display());
+                log::info!("Deleting {}", game.dir.display());
                 removal::remove_in_background(vec![staged]);
+                self.remove_from_steam(game);
                 self.library.toast.show("Game deleted.", theme::muted());
                 self.reload_library();
             }
@@ -673,6 +675,20 @@ impl App {
                 .library
                 .toast
                 .show(&format!("Cannot delete the game: {e}"), theme::danger()),
+        }
+    }
+
+    /// Its shortcut is found by its program's path, as the library knew it
+    /// (the folder may be gone already). While the autopilot writes Steam's
+    /// files, its next run removes the orphan.
+    fn remove_from_steam(&mut self, game: &Game) {
+        if !self.library.is_in_steam(game) || steam::files_busy() {
+            return;
+        }
+        let Some(cfg) = &self.config else { return };
+        match steam::remove_game(cfg, &self.library.games, game) {
+            Ok(()) => self.steam_changed = true,
+            Err(e) => log::warn!("Cannot remove {} from Steam: {e}", game.title),
         }
     }
 
@@ -695,14 +711,14 @@ impl App {
                 Some(editor::Event::Delete) => {
                     let id = editor.folder_name().to_string();
                     self.close_editor();
-                    let dir = self
+                    let game = self
                         .library
                         .games
                         .iter()
                         .find(|g| g.folder_name == id)
-                        .map(|g| g.dir.clone());
-                    if let Some(dir) = dir {
-                        self.delete_game(&dir);
+                        .cloned();
+                    if let Some(game) = game {
+                        self.delete_game(&game);
                     }
                 }
                 Some(editor::Event::Pack) => {

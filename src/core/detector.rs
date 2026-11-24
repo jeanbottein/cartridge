@@ -316,6 +316,32 @@ fn names_a_program(text: &str, program_names: &[String]) -> bool {
     })
 }
 
+fn mentions_debug(text: &str) -> bool {
+    text.to_lowercase().contains("debug")
+}
+
+/// The programs minus those with "debug" in their path in the game
+/// (`Game-Debug.x86_64`, `start-debug.sh`, `Debug/Game.exe`): never the
+/// one to play, unless the game's own name says debug or nothing else is
+/// there.
+fn without_debug_builds(
+    found: Vec<(PathBuf, Program)>,
+    game_dir: &Path,
+    real_dir: &Path,
+) -> Vec<(PathBuf, Program)> {
+    if mentions_debug(&base_name(game_dir)) || mentions_debug(&base_name(real_dir)) {
+        return found;
+    }
+    let (debug, others): (Vec<_>, Vec<_>) = found
+        .into_iter()
+        .partition(|(path, _)| mentions_debug(&paths::lossy(&paths::relpath(path, real_dir))));
+    if others.is_empty() {
+        debug
+    } else {
+        others
+    }
+}
+
 /// The binaries minus the 32-bit ones that share a platform with a 64-bit
 /// one (both are tagged x64), in the order found.
 fn without_32_bit_twins(binaries: Vec<(Platform, PathBuf)>) -> Vec<(Platform, PathBuf)> {
@@ -345,6 +371,7 @@ pub fn collect_targets(game_dir: &Path) -> Vec<Target> {
         .into_iter()
         .filter_map(|p| program_of(&p).map(|program| (p, program)))
         .collect();
+    let found = without_debug_builds(found, game_dir, &real_dir);
     let binaries: Vec<(Platform, PathBuf)> = found
         .iter()
         .filter_map(|(path, program)| match program {
@@ -872,6 +899,50 @@ mod tests {
         for text in ["./Game.x86_64-old", "MyGame.x86_64", "Game.x86_64.bak"] {
             assert!(!names_a_program(text, &names), "{text}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_debug_build_is_never_picked_while_another_is_there() {
+        let dir = TempDir::new();
+        let game = dir.mkdir("SomeGame");
+        make_exec(&dir.write("SomeGame/SomeGame-Debug.x86_64", &elf()));
+        make_exec(&dir.write("SomeGame/launcher.x86_64", &elf()));
+        dir.write("SomeGame/Debug/SomeGame.exe", &pe(0x8664));
+        dir.write("SomeGame/Release/Game.exe", &pe(0x8664));
+
+        let targets = collect_targets(&game);
+        let target = |os: &str| targets.iter().find(|t| t.os == os).unwrap().target.clone();
+        assert_eq!(target("linux"), "launcher.x86_64");
+        assert_eq!(target("windows"), "Release/Game.exe");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_debug_launcher_loses_to_the_plain_one() {
+        let dir = TempDir::new();
+        let game = dir.mkdir("SomeGame");
+        make_exec(&dir.write("SomeGame/game.x86_64", &elf()));
+        make_exec(&dir.write(
+            "SomeGame/start-debug.sh",
+            b"#!/bin/sh\n./game.x86_64 --debug\n",
+        ));
+        make_exec(&dir.write("SomeGame/start.sh", b"#!/bin/sh\n./game.x86_64\n"));
+        assert_eq!(collect_targets(&game)[0].target, "start.sh");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn debug_builds_count_in_a_game_named_debug_or_when_alone() {
+        let dir = TempDir::new();
+        let named = dir.mkdir("Debug Quest");
+        make_exec(&dir.write("Debug Quest/DebugQuest.x86_64", &elf()));
+        make_exec(&dir.write("Debug Quest/tools.x86_64", &elf()));
+        assert_eq!(collect_targets(&named)[0].target, "DebugQuest.x86_64");
+
+        let alone = dir.mkdir("SomeGame");
+        make_exec(&dir.write("SomeGame/SomeGame-debug.x86_64", &elf()));
+        assert_eq!(collect_targets(&alone)[0].target, "SomeGame-debug.x86_64");
     }
 
     /// Copies from exFAT mark every file executable: Unity's managed DLLs
