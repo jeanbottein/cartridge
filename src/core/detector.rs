@@ -1,6 +1,6 @@
 //! Pipeline step 2: find executables for games that have no targets yet,
-//! restore execute bits that copies lost, plus Proton save-folder detection
-//! for the game editor.
+//! restore execute bits that copies lost, let Linux libraries load, plus
+//! Proton save-folder detection for the game editor.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -9,7 +9,10 @@ use log::{info, warn};
 
 use super::models::{Game, SavePath, Target};
 use super::paths;
-use super::platform::{has_exec_permission, inspect, make_executable, needs_exec_bit, Program};
+use super::platform::{
+    clear_exec_stack, has_exec_permission, has_exec_stack, inspect, is_32_bit, make_executable,
+    needs_exec_bit, Program,
+};
 use super::scanner;
 use super::{steam, unique};
 
@@ -289,6 +292,25 @@ fn make_target(os: &str, arch: &str, exe: &Path, game_dir: &Path) -> Target {
     }
 }
 
+/// The binaries minus the 32-bit ones that share a platform with a 64-bit
+/// one (both are tagged x64), in the order found.
+fn without_32_bit_twins(binaries: Vec<(Platform, PathBuf)>) -> Vec<(Platform, PathBuf)> {
+    let tagged: Vec<(Platform, PathBuf, bool)> = binaries
+        .into_iter()
+        .map(|(platform, path)| {
+            let narrow = is_32_bit(&path);
+            (platform, path, narrow)
+        })
+        .collect();
+    let has_64_bit =
+        |platform: &Platform| tagged.iter().any(|(p, _, narrow)| p == platform && !narrow);
+    tagged
+        .iter()
+        .filter(|(platform, _, narrow)| !narrow || !has_64_bit(platform))
+        .map(|(platform, path, _)| (platform.clone(), path.clone()))
+        .collect()
+}
+
 /// Every target detected in `game_dir`, one per (os, arch), the best-named of
 /// each: the same on every machine, which picks its own at launch. Arch comes
 /// from headers, not names: a "64" in a helper such as
@@ -309,6 +331,7 @@ pub fn collect_targets(game_dir: &Path) -> Vec<Target> {
             Program::Script => None,
         })
         .collect();
+    let binaries = without_32_bit_twins(binaries);
     let beside = native_platform(&binaries);
     let scripts = found
         .iter()
@@ -336,15 +359,56 @@ pub fn collect_targets(game_dir: &Path) -> Vec<Target> {
         .collect()
 }
 
-/// Fill targets + title for every game that has no targets yet, and give
-/// native targets back the execute bit a copy lost.
+/// Fill targets + title for every game that has no targets yet, give native
+/// targets back the execute bit a copy lost, and let Linux games' libraries
+/// load on a recent glibc.
 pub fn detect(games: &mut [Game]) {
     detect_missing_targets(games);
     remember_appids(games);
-    games
+    let installed = || games.iter().filter(|g| g.is_installed());
+    installed().for_each(restore_exec_bits);
+    installed()
+        .filter(|g| g.targets.iter().any(|t| t.os == "linux"))
+        .for_each(clear_exec_stacks);
+}
+
+/// Library names: `libfoo.so`, `libfoo.so.10`.
+fn is_library_name(path: &Path) -> bool {
+    let name = base_name(path);
+    name.ends_with(".so") || name.contains(".so.")
+}
+
+/// Libraries of `dir` at any depth (`lib64/`, `Game_Data/Plugins/x86_64/`),
+/// never following symlinks or entering hidden folders.
+fn library_files(dir: &Path) -> Vec<PathBuf> {
+    let (dirs, files): (Vec<PathBuf>, Vec<PathBuf>) = paths::sorted_entries(dir)
+        .into_iter()
+        .filter(|name| !name.starts_with('.'))
+        .map(|name| dir.join(name))
+        .filter(|p| !paths::is_symlink(p))
+        .partition(|p| p.is_dir());
+    files
+        .into_iter()
+        .filter(|f| is_library_name(f))
+        .chain(dirs.iter().flat_map(|d| library_files(d)))
+        .collect()
+}
+
+/// glibc 2.41+ (SteamOS, Bazzite) refuses to load a library asking for an
+/// executable stack, so FMOD audio in Celeste or Night in the Woods fails.
+fn clear_exec_stacks(game: &Game) {
+    for library in library_files(&game.dir)
         .iter()
-        .filter(|g| g.is_installed())
-        .for_each(restore_exec_bits);
+        .filter(|l| has_exec_stack(l))
+    {
+        match clear_exec_stack(library) {
+            Ok(()) => info!("  Cleared executable stack: {}", library.display()),
+            Err(e) => warn!(
+                "  Cannot clear executable stack of {}: {e}",
+                library.display()
+            ),
+        }
+    }
 }
 
 /// Store the AppID each game has now (from its current title), so a later
@@ -525,7 +589,8 @@ pub fn detect_proton_save_paths(title: &str, appid: u32) -> Vec<SavePath> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::testutil::TempDir;
+    use crate::core::platform::has_exec_stack;
+    use crate::core::testutil::{elf_library, TempDir};
 
     #[test]
     fn similarity_matches_python_difflib() {
@@ -580,6 +645,85 @@ mod tests {
         assert_eq!(native.start_in, "wrapper");
         let windows = targets.iter().find(|t| t.os == "windows").unwrap();
         assert_eq!(windows.target, "wrapper/Celeste.exe");
+    }
+
+    /// The itch.io Linux build of Celeste, as installed: a launcher script
+    /// beside a 32-bit and a 64-bit binary, which share the x64 target.
+    #[cfg(unix)]
+    #[test]
+    fn a_launcher_script_beats_the_32_bit_binary_beside_it() {
+        let dir = TempDir::new();
+        let game = dir.mkdir("celeste");
+        let mut elf_i386 = elf();
+        elf_i386[18] = 0x03;
+        make_exec(&dir.write("celeste/Celeste.bin.x86", &elf_i386));
+        make_exec(&dir.write("celeste/Celeste.bin.x86_64", &elf()));
+        make_exec(&dir.write("celeste/Celeste", b"#!/bin/bash\n./Celeste.bin.x86_64 $@\n"));
+
+        let targets = collect_targets(&game);
+        let native = targets.iter().find(|t| t.os == "linux").unwrap();
+        assert_eq!(native.arch, "x64");
+        assert_eq!(native.target, "Celeste");
+    }
+
+    /// The same build without its launcher script: the 64-bit binary, never
+    /// its 32-bit twin, though "Celeste.bin" is the closer name.
+    #[cfg(unix)]
+    #[test]
+    fn a_64_bit_build_beats_its_32_bit_twin() {
+        let dir = TempDir::new();
+        let game = dir.mkdir("celeste");
+        let mut elf_i386 = elf();
+        elf_i386[4] = 1;
+        elf_i386[18] = 0x03;
+        make_exec(&dir.write("celeste/Celeste.bin.x86", &elf_i386));
+        make_exec(&dir.write("celeste/Celeste.bin.x86_64", &elf()));
+
+        let targets = collect_targets(&game);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].target, "Celeste.bin.x86_64");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_lone_32_bit_build_is_still_a_target() {
+        let dir = TempDir::new();
+        let game = dir.mkdir("Old Game");
+        let mut elf_i386 = elf();
+        elf_i386[4] = 1;
+        elf_i386[18] = 0x03;
+        make_exec(&dir.write("Old Game/game.x86", &elf_i386));
+
+        let targets = collect_targets(&game);
+        assert_eq!(targets[0].arch, "x64");
+        assert_eq!(targets[0].target, "game.x86");
+    }
+
+    #[test]
+    fn libraries_of_linux_games_lose_their_executable_stack_request() {
+        let dir = TempDir::new();
+        let linux_game = dir.mkdir("celeste");
+        let fmod = dir.write("celeste/lib64/libfmod.so.10", &elf_library(2, 7));
+        let plugin = dir.write(
+            "celeste/Game_Data/Plugins/x86_64/libfmod.so",
+            &elf_library(2, 7),
+        );
+        let windows_game = dir.mkdir("Windows Game");
+        let bundled = dir.write("Windows Game/wine/libwine.so.1", &elf_library(2, 7));
+        let game = |dir, os: &str| Game {
+            dir,
+            targets: vec![Target {
+                os: os.into(),
+                target: "game".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut games = [game(linux_game, "linux"), game(windows_game, "windows")];
+        detect(&mut games);
+        assert!(!has_exec_stack(&fmod));
+        assert!(!has_exec_stack(&plugin));
+        assert!(has_exec_stack(&bundled));
     }
 
     /// A Windows program for `machine` (0x8664 = x64, 0xAA64 = arm64).

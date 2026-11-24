@@ -1,7 +1,7 @@
 //! Current OS/arch tags and executable header parsing (ELF / PE / Mach-O).
 
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 /// Canonical OS tag stored in `game.json` targets.
@@ -47,6 +47,12 @@ fn macho_arch(cpu: u32) -> Option<&'static str> {
     }
 }
 
+const ELF_CLASS_32: u8 = 1;
+const ELF_LITTLE_ENDIAN: u8 = 1;
+const PE_I386: u16 = 0x014C;
+const PT_GNU_STACK: u32 = 0x6474_E551;
+const PF_X: u32 = 1;
+
 const MACHO_MAGICS: [u32; 2] = [0xFEED_FACE, 0xFEED_FACF];
 const FAT_MAGIC: u32 = 0xCAFE_BABE;
 const MAX_FAT_ARCHES: usize = 20;
@@ -59,6 +65,10 @@ fn u32_le(b: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(b[at..at + 4].try_into().unwrap())
 }
 
+fn u64_le(b: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(b[at..at + 8].try_into().unwrap())
+}
+
 fn u32_be(b: &[u8], at: usize) -> u32 {
     u32::from_be_bytes(b[at..at + 4].try_into().unwrap())
 }
@@ -69,7 +79,7 @@ fn read_header(file: &mut File) -> Vec<u8> {
     header
 }
 
-fn read_pe_arch(file: &mut File, header: &[u8]) -> Option<&'static str> {
+fn read_pe_machine(file: &mut File, header: &[u8]) -> Option<u16> {
     if header.len() < 64 {
         return None;
     }
@@ -79,7 +89,7 @@ fn read_pe_arch(file: &mut File, header: &[u8]) -> Option<&'static str> {
     if &sig[..4] != b"PE\0\0" {
         return None;
     }
-    pe_arch(u16_le(&sig, 4))
+    Some(u16_le(&sig, 4))
 }
 
 /// Arch of a Mach-O header: `Some(None)` for a universal binary built for
@@ -138,10 +148,82 @@ pub fn inspect(path: &Path) -> Option<Program> {
                 .flatten(),
         )
     } else if header.starts_with(b"MZ") {
-        binary("windows", read_pe_arch(&mut file, &header))
+        binary(
+            "windows",
+            read_pe_machine(&mut file, &header).and_then(pe_arch),
+        )
     } else {
         read_macho_arch(&header).and_then(|arch| binary("macos", arch))
     }
+}
+
+/// A 32-bit x86 ELF or PE program. Its arch tag is x64 (x64 machines run
+/// it), but a 64-bit build beside it is the one to run: the 32-bit libraries
+/// it needs are rarely installed.
+pub fn is_32_bit(path: &Path) -> bool {
+    let Ok(mut file) = File::open(path) else {
+        return false;
+    };
+    let header = read_header(&mut file);
+    if header.starts_with(b"\x7fELF") {
+        header.get(4) == Some(&ELF_CLASS_32)
+    } else if header.starts_with(b"MZ") {
+        read_pe_machine(&mut file, &header) == Some(PE_I386)
+    } else {
+        false
+    }
+}
+
+/// Where the flags of an ELF file's `PT_GNU_STACK` header sit, and their
+/// value, when they ask for an executable stack. Little-endian only: the
+/// x86 and ARM builds games ship.
+fn exec_stack_flags(file: &mut File) -> Option<(u64, u32)> {
+    let header = read_header(file);
+    if !header.starts_with(b"\x7fELF") || header.len() < 64 || header[5] != ELF_LITTLE_ENDIAN {
+        return None;
+    }
+    let (table_at, entry_size, count, flags_in_entry) = match header[4] {
+        ELF_CLASS_32 => (
+            u32_le(&header, 0x1C) as u64,
+            u16_le(&header, 0x2A),
+            u16_le(&header, 0x2C),
+            24,
+        ),
+        _ => (
+            u64_le(&header, 0x20),
+            u16_le(&header, 0x36),
+            u16_le(&header, 0x38),
+            4,
+        ),
+    };
+    file.seek(SeekFrom::Start(table_at)).ok()?;
+    let mut table = Vec::new();
+    file.take(entry_size as u64 * count as u64)
+        .read_to_end(&mut table)
+        .ok()?;
+    let stack_entry = table
+        .chunks_exact(entry_size.max(1) as usize)
+        .position(|entry| entry.len() >= flags_in_entry + 4 && u32_le(entry, 0) == PT_GNU_STACK)?;
+    let at = stack_entry * entry_size as usize + flags_in_entry;
+    let flags = u32_le(&table, at);
+    (flags & PF_X != 0).then_some((table_at + at as u64, flags))
+}
+
+/// An ELF library asking for an executable stack, which glibc 2.41+ refuses
+/// to load ("cannot enable executable stack"): FMOD and old Unity Mono builds.
+pub fn has_exec_stack(path: &Path) -> bool {
+    File::open(path).is_ok_and(|mut file| exec_stack_flags(&mut file).is_some())
+}
+
+/// Drop the executable-stack request, like `patchelf --clear-execstack`:
+/// none of these libraries runs code from its stack.
+pub fn clear_exec_stack(path: &Path) -> std::io::Result<()> {
+    let mut file = File::options().read(true).write(true).open(path)?;
+    let Some((at, flags)) = exec_stack_flags(&mut file) else {
+        return Ok(());
+    };
+    file.seek(SeekFrom::Start(at))?;
+    file.write_all(&(flags & !PF_X).to_le_bytes())
 }
 
 /// A program this OS runs itself (ELF, Mach-O, script), so it needs the
@@ -193,7 +275,7 @@ pub fn has_exec_permission(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::testutil::TempDir;
+    use crate::core::testutil::{elf_library, TempDir};
 
     fn binary(os: &'static str, arch: Option<&'static str>) -> Option<Program> {
         Some(Program::Binary { os, arch })
@@ -275,6 +357,46 @@ mod tests {
         assert!(needs_exec_bit(&dir.write("start.sh", b"#!/bin/sh")));
         assert!(!needs_exec_bit(&dir.write("game.exe", &pe(0x8664))));
         assert!(!needs_exec_bit(&dir.write("readme.txt", b"hello")));
+    }
+
+    #[test]
+    fn a_library_asking_for_an_executable_stack_is_found_in_32_and_64_bit() {
+        let dir = TempDir::new();
+        assert!(has_exec_stack(
+            &dir.write("lib64/libfmod.so.10", &elf_library(2, 7))
+        ));
+        assert!(has_exec_stack(
+            &dir.write("lib/libfmod.so.10", &elf_library(1, 7))
+        ));
+        assert!(!has_exec_stack(
+            &dir.write("libSDL2.so", &elf_library(2, 6))
+        ));
+        assert!(!has_exec_stack(&dir.write("notes.so", b"not a library")));
+    }
+
+    #[test]
+    fn clearing_the_executable_stack_keeps_read_and_write() {
+        let dir = TempDir::new();
+        for class in [1, 2] {
+            let library = dir.write("libfmod.so.10", &elf_library(class, 7));
+            clear_exec_stack(&library).unwrap();
+            assert!(!has_exec_stack(&library));
+            assert_eq!(std::fs::read(&library).unwrap(), elf_library(class, 6));
+        }
+    }
+
+    #[test]
+    fn a_32_bit_x86_program_is_told_apart_from_a_64_bit_one() {
+        let dir = TempDir::new();
+        let mut elf_32 = elf(0x03);
+        elf_32[4] = 1;
+        let mut elf_64 = elf(0x3E);
+        elf_64[4] = 2;
+        assert!(is_32_bit(&dir.write("Game.bin.x86", &elf_32)));
+        assert!(!is_32_bit(&dir.write("Game.bin.x86_64", &elf_64)));
+        assert!(is_32_bit(&dir.write("Game32.exe", &pe(0x014C))));
+        assert!(!is_32_bit(&dir.write("Game.exe", &pe(0x8664))));
+        assert!(!is_32_bit(&dir.write("start.sh", b"#!/bin/sh")));
     }
 
     #[cfg(unix)]
