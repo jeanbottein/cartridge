@@ -45,6 +45,7 @@ src/
     vdf.rs               # Binary (shortcuts.vdf) + text (config.vdf) KeyValues
     steam/               # users, selection (steam.json), host (detect/restart), shortcuts (vdf), clean, export, compat (Proton builds)
     steam_self.rs manifest.rs bps.rs
+    removal.rs           # editor: reset game.json (AppID kept) for a new detection + enrichment; delete a game (hidden staging rename, removed in the background)
     saver.rs             # SAVES: saves-copies/<game folder>/<save folder>/; backup under a hidden name, renamed once complete; restore empties then copies
     save_links.rs        # optional saves-links/ symlink tree (not built for now; silent where links fail, folder only with a link)
     proton.rs            # Windows games with Steam's Proton + runtime, in the shortcut's compatdata prefix; winetricks
@@ -55,7 +56,8 @@ src/
     autopilot.rs         # Worker + Watcher: lists games/ every 2 s (served from the kernel cache), waits for new entries to stop changing
   ui/                    # macroquad UI
     app.rs               # Shell: icon tabs (current one named), footer hints, game session lock, autopilot (paused while a game runs or the editor is open), warning toasts
-    library.rs editor.rs settings.rs setup.rs
+    library.rs editor.rs settings.rs setup.rs   # launching or editing a game rereads its game.json first
+    kiosk.rs             # KIOSK_MODE: Library only, launch only; unlock by holding L1+R1+X (Q+E+X) 5 s
     form.rs list.rs keyboard.rs browser.rs dialog.rs   # widgets
     network.rs jobs.rs info.rs   # Network tab, background transfers, shared info panel
     mods.rs              # MODS tab: mods with status, A turns one on/off
@@ -94,6 +96,7 @@ Packages: a plain tar of `Foo/` with `.cartridge/package.json` first and `.cartr
 - **`Config`** holds the values as typed in `config.txt` (no value is a path).
 - **UI look:** layout is in design pixels (432 px tall canvas), rendered at the window's native resolution, so 480p and 4K share one layout. Screens draw through `ui::style` and `theme::*()` colors, never raw colors; `THEME` (Settings > DISPLAY) swaps palette, typeface and corners, never positions. Midnight and Retro are built in (`engine::theme`); more are folders in `system/themes/` (`theme.json`, keys left out come from Midnight, unknown keys ignored, font file next to it), named after the folder. A theme's `tabs` colors replace the accent while that tab is open (`theme::set_tab`), so read colors through `theme::current()`/`theme::accent()` at draw time. `WINDOW_MODE`: borderless (fullscreen, default) or a resizable window; gamescope is always fullscreen.
 - **Windows games:** the UI runs them itself with Steam's Proton (`core::proton`), the way Steam runs the shortcut (runtime `_v2-entry-point` → `proton waitforexitandrun`, `STEAM_COMPAT_DATA_PATH=compatdata/<shortcut appid>`), so prefix and saves are shared with the Steam shortcut. Per-game settings: `"proton": {version, winetricks, env}` in game.json. Build: game.json `version` → the shortcut's own `CompatToolMapping` entry → Steam's default (`0`) → newest Proton (`proton::Installed::tool_for`), so Steam and cartridge share the prefix's build. A non-empty `env` (plain names only: Steam runs LaunchOptions in a shell) owns the shortcut's LaunchOptions; otherwise options set in Steam are kept. `version` pins the shortcut's compat tool only when installed. winetricks downloads: `W_CACHE` is `system/winetricks` with `PROTON_KEEP_DOWNLOADS`, else the user cache with links to what `system/winetricks` holds.
+- **Kiosk mode:** `KIOSK_MODE` (Settings > GENERAL, opt-in) hides every tab but the Library and drops every library action but launching (no editor, Steam button, unpack, quit). Holding `kiosk::UNLOCK` for 5 s writes `KIOSK_MODE=False`; editing config.txt works too. Not a secret, only out of a child's reach.
 - **Debug mode:** a file named `debug` next to the app (`core::app::debug_mode`) shows Settings > DEBUG; `DEBUG_*` keys apply only then. They are interface-only (`DEBUG_FAKE_PROGRESS` loops a fake progress card, drawn by the UI; the autopilot never sees it).
 - Flags: `is_true` for opt-in keys (STEAM_ADD_SELF, SHARE_ENABLED, ...), `is_not_false` for opt-out keys (MANIFEST_EXPORT, MUSIC_ENABLED).
 - **Steam, per game:** the user adds/removes each game (Library, Y), remembered in `system/steam.json`; the pipeline keeps exactly those shortcuts current. Ownership tag `cartridge:<id>` (`system/cartridge-id`) plus the folder-name label as a visible tag; the self-shortcut (`STEAM_ADD_SELF`, first SETTINGS option) uses `<owner tag>-self` and is applied as soon as it's toggled. Steam reads shortcuts at startup: the UI says "restart Steam" when it runs.

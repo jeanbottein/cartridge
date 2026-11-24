@@ -17,7 +17,7 @@ use crate::core::config::Config;
 use crate::core::models::{is_env_name, Game, ImageSlot, Images, Install, SavePath, Target};
 use crate::core::platform::{arch_tag, os_tag};
 use crate::core::sgdb::{self, SearchHit};
-use crate::core::{detector, paths, persister, proton, scanner, steam};
+use crate::core::{detector, paths, persister, proton, removal, scanner, steam};
 
 const OS_OPTIONS: &[&str] = &["linux", "windows", "macos", "android", "web", "any"];
 const ARCH_OPTIONS: &[&str] = &["x64", "arm64", "any"];
@@ -30,6 +30,10 @@ pub enum Event {
     Saved,
     /// Create a package of this game (one file to share or back up).
     Pack,
+    /// `game.json` was reset: the next run detects and enriches it again.
+    Reset,
+    /// Delete the game's folder.
+    Delete,
 }
 
 enum Pending {
@@ -39,6 +43,8 @@ enum Pending {
     PickMatch(Vec<SearchHit>),
     /// Replace the game's metadata and artwork with this match?
     ConfirmMatch(SearchHit),
+    Reset,
+    Delete,
 }
 
 type FetchResult = Result<Images, String>;
@@ -267,6 +273,12 @@ fn fields(game: &Game, proton_tools: &[String]) -> Vec<Field> {
         );
     }
     out.extend([
+        Field::section("START OVER"),
+        Field::button("reset", "Reset and detect again", "", theme::secondary()).with_help(
+            "Detect it and fetch its name and artwork again. Its Steam shortcut, Proton prefix and saves stay.",
+        ),
+        Field::button("delete", "Delete this game", "", theme::danger())
+            .with_help("Remove this game's folder from games/. Save backups stay."),
         Field::section(""),
         Field::button("save", "Save", "", theme::accent()),
     ]);
@@ -645,9 +657,46 @@ impl Editor {
             "fetch_art" if self.fetch.is_none() => self.start_fetch(self.game.images.clone()),
             "find_sgdb" if self.fetch.is_none() && self.search.is_none() => self.start_search(),
             "save" => return self.save(),
+            "reset" => self.confirm_reset(),
+            "delete" => self.confirm_delete(),
             _ => self.press_row(id),
         }
         None
+    }
+
+    fn confirm_reset(&mut self) {
+        let dialog = Dialog::new(
+            "Reset this game?",
+            "Its title, targets, save paths, Proton settings and artwork are forgotten, then detected and fetched again. Unsaved changes are lost.",
+            &[("Reset", theme::danger()), ("Cancel", theme::muted())],
+        );
+        self.dialog = Some((Pending::Reset, dialog));
+    }
+
+    fn confirm_delete(&mut self) {
+        let body = match self.game.package() {
+            Some(_) => "Its folder in games/ is deleted. Its package stays, to unpack again. Save backups stay.",
+            None => "Its folder in games/ is deleted, with everything in it. Save backups stay.",
+        };
+        let dialog = Dialog::new(
+            &format!("Delete {}?", self.game.folder_name),
+            body,
+            &[("Delete", theme::danger()), ("Cancel", theme::muted())],
+        );
+        self.dialog = Some((Pending::Delete, dialog));
+    }
+
+    fn reset(&mut self) -> Option<Event> {
+        match removal::reset_metadata(&self.game) {
+            Ok(()) => {
+                log::info!("Reset {}", self.game.game_json_path().display());
+                Some(Event::Reset)
+            }
+            Err(e) => {
+                self.say(&format!("Error: {e}"), Tone::Danger);
+                None
+            }
+        }
     }
 
     fn press_row(&mut self, id: &str) {
@@ -708,6 +757,8 @@ impl Editor {
                 self.apply_match(hit);
                 None
             }
+            (Pending::Reset, Some(0)) => self.reset(),
+            (Pending::Delete, Some(0)) => Some(Event::Delete),
             _ => None,
         }
     }

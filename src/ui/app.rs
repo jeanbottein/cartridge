@@ -16,6 +16,7 @@ use super::engine::shape::fill_rounded;
 use super::engine::text::Fonts;
 use super::engine::theme::{self, fade};
 use super::jobs::{Jobs, Kind};
+use super::kiosk;
 use super::launcher::Session;
 use super::library::{self, Library};
 use super::mods::ModsScreen;
@@ -32,7 +33,7 @@ use crate::core::config::{self, Config};
 use crate::core::logging::{self, Line};
 use crate::core::share::{self, client, server::Server};
 use crate::core::{init, migrations};
-use crate::core::{package, steam, steam_self, updater};
+use crate::core::{package, removal, steam, steam_self, updater};
 
 const MARGIN: f32 = 16.0;
 const HEADER_H: f32 = 36.0;
@@ -494,6 +495,11 @@ impl App {
         if self.modal_open() {
             return;
         }
+        if self.kiosk() {
+            self.tab = Tab::Library;
+            self.check_unlock();
+            return;
+        }
         let before = self.tab;
         self.switch_tabs();
         if self.tab == Tab::Saves && before != Tab::Saves {
@@ -501,6 +507,36 @@ impl App {
         }
         if self.tab == Tab::Settings && before != Tab::Settings {
             self.reload_themes();
+        }
+    }
+
+    fn kiosk(&self) -> bool {
+        self.config.as_ref().is_some_and(|c| c.is_true(kiosk::KEY))
+    }
+
+    /// Kiosk mode ends once its button combination is held long enough.
+    fn check_unlock(&mut self) {
+        let held: Vec<Option<f64>> = kiosk::UNLOCK
+            .iter()
+            .map(|&a| self.ui.input.held_for(a))
+            .collect();
+        if kiosk::unlock_progress(&held) < 1.0 {
+            return;
+        }
+        self.ui.input.hold_until_released();
+        let Some(path) = self.config.as_ref().map(|c| c.path.clone()) else {
+            return;
+        };
+        let off = BTreeMap::from([(kiosk::KEY.to_string(), "False".to_string())]);
+        match config::update_file(&path, &off) {
+            Ok(()) => {
+                self.reload_config();
+                self.library.toast.show("Kiosk mode off.", theme::accent());
+            }
+            Err(e) => self
+                .library
+                .toast
+                .show(&format!("Cannot leave kiosk mode: {e}"), theme::danger()),
         }
     }
 
@@ -612,6 +648,33 @@ impl App {
         }
     }
 
+    fn close_editor(&mut self) {
+        self.editor = None;
+        self.back_held_over = true;
+    }
+
+    /// The game leaves the library at once; its files go in the background
+    /// (a big game on an SD card takes a while). The next run removes its
+    /// Steam shortcut.
+    fn delete_game(&mut self, dir: &std::path::Path) {
+        match removal::stage_for_deletion(dir) {
+            Ok(staged) => {
+                log::info!("Deleting {}", dir.display());
+                std::thread::spawn(move || {
+                    if let Err(e) = std::fs::remove_dir_all(&staged) {
+                        log::error!("Cannot delete {}: {e}", staged.display());
+                    }
+                });
+                self.library.toast.show("Game deleted.", theme::muted());
+                self.reload_library();
+            }
+            Err(e) => self
+                .library
+                .toast
+                .show(&format!("Cannot delete the game: {e}"), theme::danger()),
+        }
+    }
+
     fn update_library(&mut self, area: Rect) {
         if let Some(editor) = &mut self.editor {
             match editor.update(&mut self.ui, area) {
@@ -622,6 +685,24 @@ impl App {
                 Some(editor::Event::Saved) => {
                     self.reload_library();
                     self.request_run(); // e.g. a new title for its Steam shortcut
+                }
+                Some(editor::Event::Reset) => {
+                    self.close_editor();
+                    self.reload_library();
+                    self.request_run(); // detect and enrich it again
+                }
+                Some(editor::Event::Delete) => {
+                    let id = editor.folder_name().to_string();
+                    self.close_editor();
+                    let dir = self
+                        .library
+                        .games
+                        .iter()
+                        .find(|g| g.folder_name == id)
+                        .map(|g| g.dir.clone());
+                    if let Some(dir) = dir {
+                        self.delete_game(&dir);
+                    }
                 }
                 Some(editor::Event::Pack) => {
                     let id = editor.folder_name().to_string();
@@ -645,6 +726,9 @@ impl App {
         let Some(event) = self.library.update(&self.ui, area, &self.jobs) else {
             return;
         };
+        if self.kiosk() && !matches!(event, library::Event::Launched(_)) {
+            return;
+        }
         let games_dir = self.config.as_ref().and_then(Config::games_dir);
         match event {
             library::Event::Launched(session) => self.session = Some(session),
@@ -795,7 +879,7 @@ impl App {
 
     /// How far along the hold-Back-to-quit gesture is (0..1).
     fn quit_progress(&self) -> f32 {
-        if self.back_held_over || self.editor.is_some() {
+        if self.back_held_over || self.editor.is_some() || self.kiosk() {
             return 0.0;
         }
         self.ui
@@ -875,6 +959,11 @@ impl App {
         style::backdrop(Rect::new(0.0, 0.0, w, CONTENT_TOP), h);
         let tabs_end = match &self.setup {
             Some(_) => self.draw_tab(MARGIN, "SETUP", None, true),
+            None if self.kiosk() => {
+                let (tab, name, icon) = &TABS[0];
+                let idle = theme::tab_color(tab.id()).unwrap_or_else(theme::muted);
+                self.draw_tab(MARGIN, name, Some((*icon, idle)), true)
+            }
             None => TABS.iter().fold(MARGIN, |x, (tab, name, icon)| {
                 let idle = theme::tab_color(tab.id()).unwrap_or_else(theme::muted);
                 self.draw_tab(x, name, Some((*icon, idle)), *tab == self.tab)
@@ -984,6 +1073,11 @@ impl App {
                 return self.network.hints(ui, &self.jobs)
             }
             (Tab::Network, _) => self.network.hints(ui, &self.jobs),
+            (Tab::Library, None) if self.kiosk() => {
+                let mut hints = self.library.hints(ui, &self.jobs);
+                hints.retain(|h| h.action == Some(Action::Confirm));
+                return hints;
+            }
             (Tab::Library, None) => {
                 let mut hints = self.library.hints(ui, &self.jobs);
                 hints.push(Hint {
