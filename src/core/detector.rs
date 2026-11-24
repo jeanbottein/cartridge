@@ -187,10 +187,14 @@ fn has_program_name(path: &Path) -> bool {
 
 /// The program `path` is, when worth offering as a target: a `.app` bundle,
 /// a Windows `.exe`, or a native program or `#!` script (with its execute
-/// bit, or named like one). Names first: only those files are opened.
+/// bit, or named like one), never a library. Names first: only those files
+/// are opened.
 fn program_of(path: &Path) -> Option<Program> {
     if is_app_bundle(path) {
         return Some(bundle_program(path));
+    }
+    if is_library_name(path) {
+        return None;
     }
     let named_like_one = is_exe_name(path) || has_exec_permission(path) || has_program_name(path);
     named_like_one.then(|| inspect(path)).flatten()
@@ -292,6 +296,17 @@ fn make_target(os: &str, arch: &str, exe: &Path, game_dir: &Path) -> Target {
     }
 }
 
+/// A launcher script: one that starts a program of the game by name
+/// (`./bin64/Chowdren`), so it already sets the folder and libraries the
+/// program needs.
+fn launches_one_of(script: &Path, program_names: &[String]) -> bool {
+    std::fs::read_to_string(script).is_ok_and(|text| {
+        program_names
+            .iter()
+            .any(|name| text.contains(name.as_str()))
+    })
+}
+
 /// The binaries minus the 32-bit ones that share a platform with a 64-bit
 /// one (both are tagged x64), in the order found.
 fn without_32_bit_twins(binaries: Vec<(Platform, PathBuf)>) -> Vec<(Platform, PathBuf)> {
@@ -331,9 +346,10 @@ pub fn collect_targets(game_dir: &Path) -> Vec<Target> {
             Program::Script => None,
         })
         .collect();
+    let program_names: Vec<String> = binaries.iter().map(|(_, path)| base_name(path)).collect();
     let binaries = without_32_bit_twins(binaries);
     let beside = native_platform(&binaries);
-    let scripts = found
+    let scripts: Vec<(Platform, PathBuf)> = found
         .iter()
         .filter(|(_, program)| *program == Program::Script)
         .map(|(path, _)| {
@@ -341,11 +357,17 @@ pub fn collect_targets(game_dir: &Path) -> Vec<Target> {
                 script_platform(path, game_dir, beside.as_ref()),
                 path.clone(),
             )
-        });
+        })
+        .collect();
+    let launchers: Vec<&PathBuf> = scripts
+        .iter()
+        .map(|(_, path)| path)
+        .filter(|path| launches_one_of(path, &program_names))
+        .collect();
 
     // A loop: groups keep the order programs were found in.
     let mut groups: Vec<(Platform, Vec<PathBuf>)> = Vec::new();
-    for (key, exe) in binaries.into_iter().chain(scripts) {
+    for (key, exe) in binaries.into_iter().chain(scripts.iter().cloned()) {
         match groups.iter_mut().find(|(k, _)| *k == key) {
             Some((_, list)) => list.push(exe),
             None => groups.push((key, vec![exe])),
@@ -354,7 +376,10 @@ pub fn collect_targets(game_dir: &Path) -> Vec<Target> {
     groups
         .iter()
         .filter_map(|((os, arch), exes)| {
-            find_best(&real_dir, exes).map(|best| make_target(os, arch, &best, game_dir))
+            let launcher = exes.iter().find(|exe| launchers.contains(exe)).cloned();
+            launcher
+                .or_else(|| find_best(&real_dir, exes))
+                .map(|best| make_target(os, arch, &best, game_dir))
         })
         .collect()
 }
@@ -684,6 +709,48 @@ mod tests {
         assert_eq!(targets[0].target, "Celeste.bin.x86_64");
     }
 
+    /// The itch.io Linux build of Baba Is You: its data sits beside the
+    /// `bin32/` and `bin64/` folders, which only `run.sh` starts it from.
+    #[cfg(unix)]
+    #[test]
+    fn the_launcher_script_of_builds_in_arch_folders_is_the_target() {
+        let dir = TempDir::new();
+        let game = dir.mkdir("baba");
+        let mut elf_i386 = elf();
+        elf_i386[4] = 1;
+        elf_i386[18] = 0x03;
+        make_exec(&dir.write("baba/Baba Is You/bin32/Chowdren", &elf_i386));
+        make_exec(&dir.write("baba/Baba Is You/bin64/Chowdren", &elf()));
+        make_exec(&dir.write(
+            "baba/Baba Is You/run.sh",
+            b"#!/bin/sh\ncd \"$GAMEDIR\"\n\"./bin64/Chowdren\"\n",
+        ));
+
+        let targets = collect_targets(&game);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].target, "Baba Is You/run.sh");
+        assert_eq!(targets[0].start_in, "Baba Is You");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_launcher_script_beats_a_better_named_program_other_scripts_do_not() {
+        let dir = TempDir::new();
+        let game = dir.mkdir("SuperGame");
+        make_exec(&dir.write("SuperGame/SuperGame.x86_64", &elf()));
+        make_exec(&dir.write(
+            "SuperGame/install.sh",
+            b"#!/bin/sh\ncp -r . ~/.local/share/supergame\n",
+        ));
+        assert_eq!(collect_targets(&game)[0].target, "SuperGame.x86_64");
+
+        make_exec(&dir.write(
+            "SuperGame/start.sh",
+            b"#!/bin/sh\nLD_LIBRARY_PATH=lib ./SuperGame.x86_64\n",
+        ));
+        assert_eq!(collect_targets(&game)[0].target, "start.sh");
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_lone_32_bit_build_is_still_a_target() {
@@ -865,6 +932,16 @@ mod tests {
         assert!(!candidate("libgame.so"));
         assert!(!candidate("libgame.so.6"));
         assert!(program_of(&write_644(&dir, "notes", b"not a program")).is_none());
+    }
+
+    /// Copies from exFAT or Windows mark every file executable.
+    #[cfg(unix)]
+    #[test]
+    fn a_library_with_the_execute_bit_is_no_program() {
+        let dir = TempDir::new();
+        let library = dir.write("SkateBIRD/UnityPlayer.so", &elf());
+        make_exec(&library);
+        assert!(program_of(&library).is_none());
     }
 
     #[cfg(unix)]
