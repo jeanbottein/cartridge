@@ -297,7 +297,7 @@ fn make_target(os: &str, arch: &str, exe: &Path, game_dir: &Path) -> Target {
 }
 
 /// A launcher script: one that starts a native program of the game by name
-/// (`./bin64/Chowdren`), so it already sets the folder and libraries the
+/// (`./bin64/game`), so it already sets the folder and libraries the
 /// program needs. Other scripts (installers, setup for the Windows build)
 /// are targets only in a game without any program (a Java game's start
 /// script).
@@ -426,7 +426,7 @@ fn library_files(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// glibc 2.41+ (SteamOS, Bazzite) refuses to load a library asking for an
-/// executable stack, so FMOD audio in Celeste or Night in the Woods fails.
+/// executable stack, so FMOD audio fails in the games that bundle it.
 fn clear_exec_stacks(game: &Game) {
     for library in library_files(&game.dir)
         .iter()
@@ -680,64 +680,64 @@ mod tests {
         assert_eq!(windows.target, "wrapper/Celeste.exe");
     }
 
-    /// The itch.io Linux build of Celeste, as installed: a launcher script
-    /// beside a 32-bit and a 64-bit binary, which share the x64 target.
+    /// A launcher script beside a 32-bit and a 64-bit build, which share
+    /// the x64 target (an FNA game's layout).
     #[cfg(unix)]
     #[test]
     fn a_launcher_script_beats_the_32_bit_binary_beside_it() {
         let dir = TempDir::new();
-        let game = dir.mkdir("celeste");
+        let game = dir.mkdir("some-game");
         let mut elf_i386 = elf();
         elf_i386[18] = 0x03;
-        make_exec(&dir.write("celeste/Celeste.bin.x86", &elf_i386));
-        make_exec(&dir.write("celeste/Celeste.bin.x86_64", &elf()));
-        make_exec(&dir.write("celeste/Celeste", b"#!/bin/bash\n./Celeste.bin.x86_64 $@\n"));
+        make_exec(&dir.write("some-game/Game.bin.x86", &elf_i386));
+        make_exec(&dir.write("some-game/Game.bin.x86_64", &elf()));
+        make_exec(&dir.write("some-game/Game", b"#!/bin/bash\n./Game.bin.x86_64 $@\n"));
 
         let targets = collect_targets(&game);
         let native = targets.iter().find(|t| t.os == "linux").unwrap();
         assert_eq!(native.arch, "x64");
-        assert_eq!(native.target, "Celeste");
+        assert_eq!(native.target, "Game");
     }
 
     /// The same build without its launcher script: the 64-bit binary, never
-    /// its 32-bit twin, though "Celeste.bin" is the closer name.
+    /// its 32-bit twin, though "Game.bin" is the closer name.
     #[cfg(unix)]
     #[test]
     fn a_64_bit_build_beats_its_32_bit_twin() {
         let dir = TempDir::new();
-        let game = dir.mkdir("celeste");
+        let game = dir.mkdir("some-game");
         let mut elf_i386 = elf();
         elf_i386[4] = 1;
         elf_i386[18] = 0x03;
-        make_exec(&dir.write("celeste/Celeste.bin.x86", &elf_i386));
-        make_exec(&dir.write("celeste/Celeste.bin.x86_64", &elf()));
+        make_exec(&dir.write("some-game/Game.bin.x86", &elf_i386));
+        make_exec(&dir.write("some-game/Game.bin.x86_64", &elf()));
 
         let targets = collect_targets(&game);
         assert_eq!(targets.len(), 1);
-        assert_eq!(targets[0].target, "Celeste.bin.x86_64");
+        assert_eq!(targets[0].target, "Game.bin.x86_64");
     }
 
-    /// The itch.io Linux build of Baba Is You: its data sits beside the
-    /// `bin32/` and `bin64/` folders, which only `run.sh` starts it from.
+    /// A game whose data sits beside its `bin32/` and `bin64/` folders,
+    /// which only `run.sh` starts it from (a Chowdren port's layout).
     #[cfg(unix)]
     #[test]
     fn the_launcher_script_of_builds_in_arch_folders_is_the_target() {
         let dir = TempDir::new();
-        let game = dir.mkdir("baba");
+        let game = dir.mkdir("some-game");
         let mut elf_i386 = elf();
         elf_i386[4] = 1;
         elf_i386[18] = 0x03;
-        make_exec(&dir.write("baba/Baba Is You/bin32/Chowdren", &elf_i386));
-        make_exec(&dir.write("baba/Baba Is You/bin64/Chowdren", &elf()));
+        make_exec(&dir.write("some-game/Some Game/bin32/game", &elf_i386));
+        make_exec(&dir.write("some-game/Some Game/bin64/game", &elf()));
         make_exec(&dir.write(
-            "baba/Baba Is You/run.sh",
-            b"#!/bin/sh\ncd \"$GAMEDIR\"\n\"./bin64/Chowdren\"\n",
+            "some-game/Some Game/run.sh",
+            b"#!/bin/sh\ncd \"$GAMEDIR\"\n\"./bin64/game\"\n",
         ));
 
         let targets = collect_targets(&game);
         assert_eq!(targets.len(), 1);
-        assert_eq!(targets[0].target, "Baba Is You/run.sh");
-        assert_eq!(targets[0].start_in, "Baba Is You");
+        assert_eq!(targets[0].target, "Some Game/run.sh");
+        assert_eq!(targets[0].start_in, "Some Game");
     }
 
     #[cfg(unix)]
@@ -777,10 +777,10 @@ mod tests {
     #[test]
     fn libraries_of_linux_games_lose_their_executable_stack_request() {
         let dir = TempDir::new();
-        let linux_game = dir.mkdir("celeste");
-        let fmod = dir.write("celeste/lib64/libfmod.so.10", &elf_library(2, 7));
+        let linux_game = dir.mkdir("Linux Game");
+        let fmod = dir.write("Linux Game/lib64/libfmod.so.10", &elf_library(2, 7));
         let plugin = dir.write(
-            "celeste/Game_Data/Plugins/x86_64/libfmod.so",
+            "Linux Game/Game_Data/Plugins/x86_64/libfmod.so",
             &elf_library(2, 7),
         );
         let windows_game = dir.mkdir("Windows Game");
@@ -801,17 +801,17 @@ mod tests {
         assert!(has_exec_stack(&bundled));
     }
 
-    /// A setup script for the Windows build (NOLF's French audio fix) is no
-    /// way to start the game: Proton is.
+    /// A setup script for the Windows build (protontricks for its audio) is
+    /// no way to start the game: Proton is.
     #[cfg(unix)]
     #[test]
     fn a_script_beside_windows_programs_only_is_no_target() {
         let dir = TempDir::new();
-        let game = dir.mkdir("NoOneLivesForever");
-        dir.write("NoOneLivesForever/NOLF.EXE", &pe(0x014C));
+        let game = dir.mkdir("Windows Game");
+        dir.write("Windows Game/GAME.EXE", &pe(0x014C));
         make_exec(&dir.write(
-            "NoOneLivesForever/setup_steamos.sh",
-            b"#!/bin/bash\nGAME_PATH=$(realpath \"NOLF.exe\")\nprotontricks $APPID dsound\n",
+            "Windows Game/setup_steamos.sh",
+            b"#!/bin/bash\nGAME_PATH=$(realpath \"GAME.exe\")\nprotontricks $APPID dsound\n",
         ));
 
         let targets = collect_targets(&game);
@@ -841,17 +841,17 @@ mod tests {
     #[test]
     fn libraries_marked_executable_are_no_programs() {
         let dir = TempDir::new();
-        let game = dir.mkdir("Islands");
-        make_exec(&dir.write("Islands/Islands_Linux.x86_64", &elf()));
+        let game = dir.mkdir("Unity Game");
+        make_exec(&dir.write("Unity Game/UnityGame.x86_64", &elf()));
         make_exec(&dir.write(
-            "Islands/Islands_Linux_Data/Managed/Assembly-CSharp.dll",
+            "Unity Game/UnityGame_Data/Managed/Assembly-CSharp.dll",
             &pe(0x014C),
         ));
-        make_exec(&dir.write("Islands/UnityPlayer_s.debug", &elf_library(2, 6)));
+        make_exec(&dir.write("Unity Game/UnityPlayer_s.debug", &elf_library(2, 6)));
 
         let targets = collect_targets(&game);
         assert_eq!(targets.len(), 1);
-        assert_eq!(targets[0].target, "Islands_Linux.x86_64");
+        assert_eq!(targets[0].target, "UnityGame.x86_64");
     }
 
     /// A Windows program for `machine` (0x8664 = x64, 0xAA64 = arm64).
@@ -1036,12 +1036,12 @@ mod tests {
     #[test]
     fn a_launcher_script_takes_its_os_and_arch_from_the_folder_name() {
         let dir = TempDir::new();
-        let game = dir.mkdir("lennas-inception-linux-amd64-stable");
+        let game = dir.mkdir("java-game-linux-amd64-stable");
         make_exec(&dir.write(
-            "lennas-inception-linux-amd64-stable/lennasinception",
+            "java-game-linux-amd64-stable/javagame",
             b"#!/bin/bash\nexec ./jre/bin/java -jar lib/libloader.jar",
         ));
-        make_exec(&dir.write("lennas-inception-linux-amd64-stable/jre/bin/java", &elf()));
+        make_exec(&dir.write("java-game-linux-amd64-stable/jre/bin/java", &elf()));
 
         let targets = collect_targets(&game);
         assert_eq!(targets.len(), 1);
@@ -1049,21 +1049,21 @@ mod tests {
             (targets[0].os.as_str(), targets[0].arch.as_str()),
             ("linux", "x64")
         );
-        assert_eq!(targets[0].target, "lennasinception");
+        assert_eq!(targets[0].target, "javagame");
     }
 
     #[cfg(unix)]
     #[test]
     fn a_script_without_hints_runs_where_the_programs_beside_it_do() {
         let dir = TempDir::new();
-        let game = dir.mkdir("Celeste");
-        make_exec(&dir.write("Celeste/Celeste", b"#!/bin/sh\n./Celeste.bin.x86_64"));
-        make_exec(&dir.write("Celeste/Celeste.bin.x86_64", &elf()));
+        let game = dir.mkdir("Some Game");
+        make_exec(&dir.write("Some Game/game", b"#!/bin/sh\n./game.bin.x86_64"));
+        make_exec(&dir.write("Some Game/game.bin.x86_64", &elf()));
 
         let targets = collect_targets(&game);
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].os, "linux");
-        assert_eq!(targets[0].target, "Celeste");
+        assert_eq!(targets[0].target, "game");
     }
 
     #[cfg(unix)]
@@ -1087,7 +1087,7 @@ mod tests {
         assert_eq!(os_hint("machinarium/run.sh"), None);
         assert_eq!(arch_hint("game-amd64"), Some("x64"));
         assert_eq!(arch_hint("game-aarch64"), Some("arm64"));
-        assert_eq!(arch_hint("celeste.bin.x86_64"), Some("x64"));
+        assert_eq!(arch_hint("game.bin.x86_64"), Some("x64"));
         assert_eq!(arch_hint("game-2064"), None);
         assert_eq!(arch_hint("box64-wrapper"), None);
     }
@@ -1098,7 +1098,7 @@ mod tests {
         let dir = TempDir::new();
         let candidate = |name: &str| program_of(&write_644(&dir, name, b"#!/bin/sh\n")).is_some();
         assert!(candidate("start.sh"));
-        assert!(candidate("lennasinception"));
+        assert!(candidate("javagame"));
         assert!(!candidate("notes.txt"));
     }
 
