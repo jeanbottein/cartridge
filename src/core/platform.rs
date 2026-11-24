@@ -50,6 +50,8 @@ fn macho_arch(cpu: u32) -> Option<&'static str> {
 const ELF_CLASS_32: u8 = 1;
 const ELF_LITTLE_ENDIAN: u8 = 1;
 const PE_I386: u16 = 0x014C;
+const ET_EXEC: u16 = 2;
+const PT_INTERP: u32 = 3;
 const PT_GNU_STACK: u32 = 0x6474_E551;
 const PF_X: u32 = 1;
 
@@ -132,8 +134,8 @@ pub enum Program {
     Script,
 }
 
-/// The program `path` is, or `None` for anything else (text, data, libraries
-/// are told apart by name, not here).
+/// The program `path` is, or `None` for anything else: text, data, ELF
+/// libraries (Windows DLLs are told apart by name, not here).
 pub fn inspect(path: &Path) -> Option<Program> {
     let mut file = File::open(path).ok()?;
     let header = read_header(&mut file);
@@ -141,6 +143,9 @@ pub fn inspect(path: &Path) -> Option<Program> {
     if header.starts_with(b"#!") {
         Some(Program::Script)
     } else if header.starts_with(b"\x7fELF") {
+        if !is_elf_program(&mut file, &header) {
+            return None;
+        }
         binary(
             "linux",
             (header.len() >= 20)
@@ -174,39 +179,76 @@ pub fn is_32_bit(path: &Path) -> bool {
     }
 }
 
+/// An ELF file's program header table: where it starts, its entries, and
+/// where an entry keeps its flags. Little-endian only: the x86 and ARM
+/// builds games ship.
+struct ProgramHeaders {
+    at: u64,
+    table: Vec<u8>,
+    entry_size: usize,
+    flags_in_entry: usize,
+}
+
+impl ProgramHeaders {
+    fn read(file: &mut File, header: &[u8]) -> Option<ProgramHeaders> {
+        if !header.starts_with(b"\x7fELF") || header.len() < 64 || header[5] != ELF_LITTLE_ENDIAN {
+            return None;
+        }
+        let (at, entry_size, count, flags_in_entry) = match header[4] {
+            ELF_CLASS_32 => (
+                u32_le(header, 0x1C) as u64,
+                u16_le(header, 0x2A),
+                u16_le(header, 0x2C),
+                24,
+            ),
+            _ => (
+                u64_le(header, 0x20),
+                u16_le(header, 0x36),
+                u16_le(header, 0x38),
+                4,
+            ),
+        };
+        if (entry_size as usize) < flags_in_entry + 4 {
+            return None;
+        }
+        file.seek(SeekFrom::Start(at)).ok()?;
+        let mut table = Vec::new();
+        file.take(entry_size as u64 * count as u64)
+            .read_to_end(&mut table)
+            .ok()?;
+        Some(ProgramHeaders {
+            at,
+            table,
+            entry_size: entry_size as usize,
+            flags_in_entry,
+        })
+    }
+
+    /// Offset in the table of the first entry of `kind`.
+    fn find(&self, kind: u32) -> Option<usize> {
+        self.table
+            .chunks_exact(self.entry_size)
+            .position(|entry| u32_le(entry, 0) == kind)
+            .map(|index| index * self.entry_size)
+    }
+}
+
+/// An ELF file that runs as a program: an executable, or a position
+/// independent one (ET_DYN like a library, but naming its interpreter).
+fn is_elf_program(file: &mut File, header: &[u8]) -> bool {
+    header.len() >= 18 && u16_le(header, 16) == ET_EXEC
+        || ProgramHeaders::read(file, header)
+            .is_some_and(|headers| headers.find(PT_INTERP).is_some())
+}
+
 /// Where the flags of an ELF file's `PT_GNU_STACK` header sit, and their
-/// value, when they ask for an executable stack. Little-endian only: the
-/// x86 and ARM builds games ship.
+/// value, when they ask for an executable stack.
 fn exec_stack_flags(file: &mut File) -> Option<(u64, u32)> {
     let header = read_header(file);
-    if !header.starts_with(b"\x7fELF") || header.len() < 64 || header[5] != ELF_LITTLE_ENDIAN {
-        return None;
-    }
-    let (table_at, entry_size, count, flags_in_entry) = match header[4] {
-        ELF_CLASS_32 => (
-            u32_le(&header, 0x1C) as u64,
-            u16_le(&header, 0x2A),
-            u16_le(&header, 0x2C),
-            24,
-        ),
-        _ => (
-            u64_le(&header, 0x20),
-            u16_le(&header, 0x36),
-            u16_le(&header, 0x38),
-            4,
-        ),
-    };
-    file.seek(SeekFrom::Start(table_at)).ok()?;
-    let mut table = Vec::new();
-    file.take(entry_size as u64 * count as u64)
-        .read_to_end(&mut table)
-        .ok()?;
-    let stack_entry = table
-        .chunks_exact(entry_size.max(1) as usize)
-        .position(|entry| entry.len() >= flags_in_entry + 4 && u32_le(entry, 0) == PT_GNU_STACK)?;
-    let at = stack_entry * entry_size as usize + flags_in_entry;
-    let flags = u32_le(&table, at);
-    (flags & PF_X != 0).then_some((table_at + at as u64, flags))
+    let headers = ProgramHeaders::read(file, &header)?;
+    let at = headers.find(PT_GNU_STACK)? + headers.flags_in_entry;
+    let flags = u32_le(&headers.table, at);
+    (flags & PF_X != 0).then_some((headers.at + at as u64, flags))
 }
 
 /// An ELF library asking for an executable stack, which glibc 2.41+ refuses
@@ -281,9 +323,11 @@ mod tests {
         Some(Program::Binary { os, arch })
     }
 
+    /// An executable (ET_EXEC) header for `machine`.
     fn elf(machine: u8) -> Vec<u8> {
-        let mut bytes = b"\x7fELF".to_vec();
+        let mut bytes = b"\x7fELF\x02\x01".to_vec();
         bytes.resize(64, 0);
+        bytes[16] = 2;
         bytes[18] = machine;
         bytes
     }
@@ -357,6 +401,22 @@ mod tests {
         assert!(needs_exec_bit(&dir.write("start.sh", b"#!/bin/sh")));
         assert!(!needs_exec_bit(&dir.write("game.exe", &pe(0x8664))));
         assert!(!needs_exec_bit(&dir.write("readme.txt", b"hello")));
+    }
+
+    /// PIE executables are ET_DYN like libraries: only they name an
+    /// interpreter (`/lib64/ld-linux-x86-64.so.2`).
+    #[test]
+    fn an_elf_library_is_no_program_a_pie_executable_is() {
+        let dir = TempDir::new();
+        let library = elf_library(2, 6);
+        let mut pie = library.clone();
+        pie[64..68].copy_from_slice(&PT_INTERP.to_le_bytes());
+        assert_eq!(inspect(&dir.write("UnityPlayer.so", &library)), None);
+        assert_eq!(
+            inspect(&dir.write("pd.x86_64", &pie)),
+            binary("linux", Some("x64"))
+        );
+        assert!(!needs_exec_bit(&dir.write("libfmod.so.10", &library)));
     }
 
     #[test]

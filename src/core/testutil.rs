@@ -40,7 +40,7 @@ impl Drop for TempDir {
     }
 }
 
-/// A little-endian ELF library (`class` 1 = 32-bit, 2 = 64-bit) whose one
+/// A little-endian x86 ELF library (`class` 1 = 32-bit, 2 = 64-bit) whose one
 /// program header is `PT_GNU_STACK` with `flags` (7 = RWX, 6 = RW).
 pub fn elf_library(class: u8, flags: u32) -> Vec<u8> {
     const PT_GNU_STACK: u32 = 0x6474_E551;
@@ -49,6 +49,8 @@ pub fn elf_library(class: u8, flags: u32) -> Vec<u8> {
     let mut bytes = b"\x7fELF".to_vec();
     bytes.extend([class, 1]);
     bytes.resize(header_size, 0);
+    bytes[16] = 3; // ET_DYN
+    bytes[18] = if is_32 { 0x03 } else { 0x3E };
     let count_at = if is_32 {
         bytes[0x1C..0x20].copy_from_slice(&(header_size as u32).to_le_bytes());
         0x2A

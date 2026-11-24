@@ -12,7 +12,7 @@ core::pipeline::Pipeline (one fixed sequence; each phase only does what is missi
                           steps 2-4 run per batch of 10 games, each batch written before the next)
  0. migrations::run_all      # Idempotent data migrations
  1. scanner::scan            # Parse .cartridge/game.json into Vec<Game>
- 2. detector::detect         # Fill missing targets (programs, .app, #! scripts; per os/arch, host-independent; the launcher script that starts one of its programs, else a 64-bit build over its 32-bit twin; never a library), restore lost exec bits, clear exec-stack requests of Linux games' libraries (glibc 2.41+ refuses them)
+ 2. detector::detect         # Fill missing targets (programs, .app, #! scripts; per os/arch, host-independent; a script only as the launcher of a native program, which then wins, or in a game with no program; a 64-bit build over its 32-bit twin; ELF libraries and .dll never), restore lost exec bits, clear exec-stack requests of Linux games' libraries (glibc 2.41+ refuses them)
     sizer::measure           #   + size on disk into game.json (only when unknown: kept until reinstalled)
  3. sgdb::enrich             # SteamGridDB names/IDs/artwork (if API key)
  4. persister::persist       # Write game.json + download images, always in each game's .cartridge/

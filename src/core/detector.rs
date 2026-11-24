@@ -186,18 +186,18 @@ fn has_program_name(path: &Path) -> bool {
 }
 
 /// The program `path` is, when worth offering as a target: a `.app` bundle,
-/// a Windows `.exe`, or a native program or `#!` script (with its execute
-/// bit, or named like one), never a library. Names first: only those files
+/// a Windows `.exe` (never a `.dll`), or a native program or `#!` script
+/// (with its execute bit, or named like one). Names first: only those files
 /// are opened.
 fn program_of(path: &Path) -> Option<Program> {
     if is_app_bundle(path) {
         return Some(bundle_program(path));
     }
-    if is_library_name(path) {
-        return None;
-    }
     let named_like_one = is_exe_name(path) || has_exec_permission(path) || has_program_name(path);
-    named_like_one.then(|| inspect(path)).flatten()
+    match named_like_one.then(|| inspect(path)).flatten()? {
+        Program::Binary { os: "windows", .. } if !is_exe_name(path) => None,
+        program => Some(program),
+    }
 }
 
 /// Descend through folders that only contain a single subfolder (never into
@@ -296,9 +296,11 @@ fn make_target(os: &str, arch: &str, exe: &Path, game_dir: &Path) -> Target {
     }
 }
 
-/// A launcher script: one that starts a program of the game by name
+/// A launcher script: one that starts a native program of the game by name
 /// (`./bin64/Chowdren`), so it already sets the folder and libraries the
-/// program needs.
+/// program needs. Other scripts (installers, setup for the Windows build)
+/// are targets only in a game without any program (a Java game's start
+/// script).
 fn launches_one_of(script: &Path, program_names: &[String]) -> bool {
     std::fs::read_to_string(script).is_ok_and(|text| {
         program_names
@@ -346,7 +348,12 @@ pub fn collect_targets(game_dir: &Path) -> Vec<Target> {
             Program::Script => None,
         })
         .collect();
-    let program_names: Vec<String> = binaries.iter().map(|(_, path)| base_name(path)).collect();
+    let native_names: Vec<String> = binaries
+        .iter()
+        .filter(|((os, _), _)| os != "windows")
+        .map(|(_, path)| base_name(path))
+        .collect();
+    let no_program = binaries.is_empty();
     let binaries = without_32_bit_twins(binaries);
     let beside = native_platform(&binaries);
     let scripts: Vec<(Platform, PathBuf)> = found
@@ -358,11 +365,7 @@ pub fn collect_targets(game_dir: &Path) -> Vec<Target> {
                 path.clone(),
             )
         })
-        .collect();
-    let launchers: Vec<&PathBuf> = scripts
-        .iter()
-        .map(|(_, path)| path)
-        .filter(|path| launches_one_of(path, &program_names))
+        .filter(|(_, path)| no_program || launches_one_of(path, &native_names))
         .collect();
 
     // A loop: groups keep the order programs were found in.
@@ -376,7 +379,10 @@ pub fn collect_targets(game_dir: &Path) -> Vec<Target> {
     groups
         .iter()
         .filter_map(|((os, arch), exes)| {
-            let launcher = exes.iter().find(|exe| launchers.contains(exe)).cloned();
+            let launcher = exes
+                .iter()
+                .find(|exe| scripts.iter().any(|(_, script)| script == *exe))
+                .cloned();
             launcher
                 .or_else(|| find_best(&real_dir, exes))
                 .map(|best| make_target(os, arch, &best, game_dir))
@@ -633,9 +639,11 @@ mod tests {
     }
 
     #[cfg(unix)]
+    /// A 64-bit x86 executable (ET_EXEC) header.
     fn elf() -> Vec<u8> {
-        let mut bytes = b"\x7fELF".to_vec();
+        let mut bytes = b"\x7fELF\x02\x01".to_vec();
         bytes.resize(64, 0);
+        bytes[16] = 2;
         bytes[18] = 0x3E;
         bytes
     }
@@ -793,6 +801,59 @@ mod tests {
         assert!(has_exec_stack(&bundled));
     }
 
+    /// A setup script for the Windows build (NOLF's French audio fix) is no
+    /// way to start the game: Proton is.
+    #[cfg(unix)]
+    #[test]
+    fn a_script_beside_windows_programs_only_is_no_target() {
+        let dir = TempDir::new();
+        let game = dir.mkdir("NoOneLivesForever");
+        dir.write("NoOneLivesForever/NOLF.EXE", &pe(0x014C));
+        make_exec(&dir.write(
+            "NoOneLivesForever/setup_steamos.sh",
+            b"#!/bin/bash\nGAME_PATH=$(realpath \"NOLF.exe\")\nprotontricks $APPID dsound\n",
+        ));
+
+        let targets = collect_targets(&game);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].os, "windows");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_script_that_launches_no_program_of_the_game_is_no_target() {
+        let dir = TempDir::new();
+        let game = dir.mkdir("Game");
+        make_exec(&dir.write("Game/Game.x86_64", &elf()));
+        make_exec(&dir.write(
+            "Game/install.sh",
+            b"#!/bin/sh\ncp -r . ~/.local/share/game\n",
+        ));
+
+        let targets = collect_targets(&game);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].target, "Game.x86_64");
+    }
+
+    /// Copies from exFAT mark every file executable: Unity's managed DLLs
+    /// are PE files, its UnityPlayer an ELF library under any name.
+    #[cfg(unix)]
+    #[test]
+    fn libraries_marked_executable_are_no_programs() {
+        let dir = TempDir::new();
+        let game = dir.mkdir("Islands");
+        make_exec(&dir.write("Islands/Islands_Linux.x86_64", &elf()));
+        make_exec(&dir.write(
+            "Islands/Islands_Linux_Data/Managed/Assembly-CSharp.dll",
+            &pe(0x014C),
+        ));
+        make_exec(&dir.write("Islands/UnityPlayer_s.debug", &elf_library(2, 6)));
+
+        let targets = collect_targets(&game);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].target, "Islands_Linux.x86_64");
+    }
+
     /// A Windows program for `machine` (0x8664 = x64, 0xAA64 = arm64).
     fn pe(machine: u16) -> Vec<u8> {
         let mut bytes = b"MZ".to_vec();
@@ -932,16 +993,6 @@ mod tests {
         assert!(!candidate("libgame.so"));
         assert!(!candidate("libgame.so.6"));
         assert!(program_of(&write_644(&dir, "notes", b"not a program")).is_none());
-    }
-
-    /// Copies from exFAT or Windows mark every file executable.
-    #[cfg(unix)]
-    #[test]
-    fn a_library_with_the_execute_bit_is_no_program() {
-        let dir = TempDir::new();
-        let library = dir.write("SkateBIRD/UnityPlayer.so", &elf());
-        make_exec(&library);
-        assert!(program_of(&library).is_none());
     }
 
     #[cfg(unix)]
