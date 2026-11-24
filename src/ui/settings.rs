@@ -8,6 +8,7 @@ use macroquad::prelude::*;
 use super::app_update::{self, AppUpdate};
 use super::engine::theme::{self, Tone};
 use super::form::{Event as FormEvent, Field, Form};
+use super::kiosk;
 use super::{Hint, Ui};
 use crate::core::app::debug_mode;
 use crate::core::config::{self, Config};
@@ -58,7 +59,7 @@ const SCHEMA: [(&str, &[Setting]); 5] = [
         s(SELF_SHORTCUT, "Add {} to Steam", Kind::Flag(false), "Add this cartridge to Steam under its folder name, with retro artwork (or your cover.png, hero.png... in system/). Applied right away."),
         s("MUSIC_ENABLED", "Background music", Kind::Flag(true), "Shuffle the audio files in system/ (mp3, flac, ogg, wav, m4a); fades out while a game runs. SELECT (M) turns it on and off anywhere."),
         s("MUSIC_VOLUME", "Music volume", Kind::Percent(50), "How loud the background music plays. Applied right away."),
-        s("KIOSK_MODE", "Kiosk mode", Kind::Flag(false), "Children-proof: only the Library, and only launching games. To leave it, hold L1 + R1 + X (Q + E + X on a keyboard) for 5 seconds, or set KIOSK_MODE=False in system/config.txt."),
+        s("KIOSK_MODE", "Kiosk mode", Kind::Choice(kiosk::LEVELS), "Children-proof. on: the Library only, to launch games or quit. strict: launching only. To leave it, hold L1 + R1 + X (Q + E + X) for 5 seconds, or set KIOSK_MODE=off in system/config.txt."),
     ]),
     ("DISPLAY", &[
         s("THEME", "Theme", Kind::Theme, "Colors, font and shapes of the interface. The layout stays the same."),

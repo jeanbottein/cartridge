@@ -16,7 +16,7 @@ use super::engine::shape::fill_rounded;
 use super::engine::text::Fonts;
 use super::engine::theme::{self, fade};
 use super::jobs::{Jobs, Kind};
-use super::kiosk;
+use super::kiosk::{self, Level};
 use super::launcher::Session;
 use super::library::{self, Library};
 use super::mods::ModsScreen;
@@ -510,8 +510,12 @@ impl App {
         }
     }
 
+    fn kiosk_level(&self) -> Level {
+        Level::of(self.config.as_ref().and_then(|c| c.get(kiosk::KEY)))
+    }
+
     fn kiosk(&self) -> bool {
-        self.config.as_ref().is_some_and(|c| c.is_true(kiosk::KEY))
+        self.kiosk_level() != Level::Off
     }
 
     /// Kiosk mode ends once its button combination is held long enough.
@@ -527,7 +531,7 @@ impl App {
         let Some(path) = self.config.as_ref().map(|c| c.path.clone()) else {
             return;
         };
-        let off = BTreeMap::from([(kiosk::KEY.to_string(), "False".to_string())]);
+        let off = BTreeMap::from([(kiosk::KEY.to_string(), "off".to_string())]);
         match config::update_file(&path, &off) {
             Ok(()) => {
                 self.reload_config();
@@ -879,7 +883,7 @@ impl App {
 
     /// How far along the hold-Back-to-quit gesture is (0..1).
     fn quit_progress(&self) -> f32 {
-        if self.back_held_over || self.editor.is_some() || self.kiosk() {
+        if self.back_held_over || self.editor.is_some() || self.kiosk_level() == Level::Strict {
             return 0.0;
         }
         self.ui
@@ -1073,13 +1077,14 @@ impl App {
                 return self.network.hints(ui, &self.jobs)
             }
             (Tab::Network, _) => self.network.hints(ui, &self.jobs),
-            (Tab::Library, None) if self.kiosk() => {
-                let mut hints = self.library.hints(ui, &self.jobs);
-                hints.retain(|h| h.action == Some(Action::Confirm));
-                return hints;
-            }
             (Tab::Library, None) => {
                 let mut hints = self.library.hints(ui, &self.jobs);
+                if self.kiosk() {
+                    hints.retain(|h| h.action == Some(Action::Confirm));
+                }
+                if self.kiosk_level() == Level::Strict {
+                    return hints;
+                }
                 hints.push(Hint {
                     progress: self.quit_progress(),
                     // A hold gesture: a click would quit too easily.
