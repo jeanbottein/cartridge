@@ -232,6 +232,22 @@ pub fn load_game(dir: &Path) -> Option<Game> {
     Some(game)
 }
 
+/// `game` as its game.json says now (edited by hand, or by another app),
+/// keeping its package: the folder watcher only sees games come and go. A
+/// packaged game, or one whose game.json can't be read, stays as it was.
+pub fn reload(game: &Game) -> Game {
+    if !game.is_installed() {
+        return game.clone();
+    }
+    match load_game(&game.dir) {
+        Some(fresh) => Game {
+            install: game.install.clone(),
+            ..fresh
+        },
+        None => game.clone(),
+    }
+}
+
 /// A package not unpacked yet: read-only metadata, nothing resolved (it can't
 /// run). `None` when the package can't be read.
 pub fn load_package(package: &Path, games_dir: &Path) -> Option<Game> {
@@ -446,6 +462,60 @@ mod tests {
         let path = dir.write("Broken/.cartridge/game.json", b"{ not json");
         assert!(scan(dir.path()).is_empty());
         assert_eq!(std::fs::read(path).unwrap(), b"{ not json");
+    }
+
+    #[test]
+    fn reloading_a_game_reads_its_game_json_again_and_keeps_its_package() {
+        let dir = TempDir::new();
+        let json = |target: &str| {
+            format!(
+                r#"{{"title": "Some Game", "targets": [{{"os": "any", "target": "{target}"}}]}}"#
+            )
+        };
+        let path = dir.write(
+            "some-game/.cartridge/game.json",
+            json("bin32/game").as_bytes(),
+        );
+        let package = dir.path().join("some-game.cartridge.tar");
+        let loaded = Game {
+            install: Install::InstalledWithPackage {
+                package: package.clone(),
+                verified: true,
+            },
+            ..load_game(&dir.path().join("some-game")).unwrap()
+        };
+        std::fs::write(&path, json("run.sh")).unwrap();
+
+        let reloaded = reload(&loaded);
+        assert_eq!(reloaded.targets[0].target, "run.sh");
+        assert_eq!(
+            reloaded.resolved.unwrap().target,
+            dir.path().join("some-game/run.sh")
+        );
+        assert_eq!(
+            reloaded.install,
+            Install::InstalledWithPackage {
+                package,
+                verified: true
+            }
+        );
+    }
+
+    #[test]
+    fn reloading_keeps_the_loaded_game_when_its_game_json_broke() {
+        let dir = TempDir::new();
+        let path = dir.write("Game/.cartridge/game.json", br#"{"title": "Game"}"#);
+        let loaded = load_game(&dir.path().join("Game")).unwrap();
+        std::fs::write(&path, b"{ half written").unwrap();
+        assert_eq!(reload(&loaded).title, "Game");
+    }
+
+    #[test]
+    fn reloading_a_packaged_game_reads_nothing() {
+        let dir = TempDir::new();
+        let package = pack_into(&dir, "Alpha");
+        let loaded = load_package(&package, &dir.path().join("games")).unwrap();
+        assert_eq!(reload(&loaded).install, Install::Packaged { package });
     }
 
     fn pack_into(dir: &TempDir, name: &str) -> PathBuf {

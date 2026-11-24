@@ -158,6 +158,12 @@ impl Library {
         self.downloads = snapshot.downloads;
     }
 
+    /// The focused game as its game.json says now: a target fixed by hand
+    /// is the one launched or edited, without restarting the app.
+    fn reread_focused(&mut self) {
+        self.games[self.cursor] = scanner::reload(&self.games[self.cursor]);
+    }
+
     /// Still reading the library for the first time.
     fn first_load(&self) -> bool {
         self.pending.is_some() && self.games.is_empty()
@@ -281,9 +287,12 @@ impl Library {
         let installed = game.is_installed();
 
         if ui.action(Action::Edit) {
+            if !busy && installed {
+                self.reread_focused();
+            }
             return match (busy, installed) {
                 (true, _) => Some(Event::Cancel(id)),
-                (false, true) if game.is_from_newer_app() => {
+                (false, true) if self.games[self.cursor].is_from_newer_app() => {
                     self.toast.show(NEWER_APP, theme::secondary());
                     None
                 }
@@ -309,6 +318,7 @@ impl Library {
         if !installed {
             return Some(Event::Unpack(self.cursor));
         }
+        self.reread_focused();
         match launcher::launch(&self.games[self.cursor], &self.downloads) {
             Ok(session) => Some(Event::Launched(session)),
             Err(message) => {
