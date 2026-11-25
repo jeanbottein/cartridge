@@ -163,7 +163,7 @@ fn search(cfg: &Config) -> Receiver<Peers> {
     let (tx, rx) = channel();
     let cfg = cfg.clone();
     std::thread::spawn(move || {
-        let (sharing, older): (Vec<Peer>, Vec<Peer>) = client::find_peers(&cfg)
+        let (sharing, older): (Vec<Peer>, Vec<Peer>) = by_name(client::find_peers(&cfg))
             .into_iter()
             .partition(|peer| peer.info.mismatch().is_none() && peer.info.has(share::SAVES));
         let outdated = older
@@ -180,6 +180,13 @@ fn search(cfg: &Config) -> Receiver<Peers> {
         let _ = tx.send(Peers { sharing, outdated });
     });
     rx
+}
+
+/// Machines by name, so their rows keep their places from one search to
+/// the next (answers arrive in any order).
+fn by_name(mut peers: Vec<Peer>) -> Vec<Peer> {
+    peers.sort_by_key(|peer| (peer.info.name.to_lowercase(), peer.addr));
+    peers
 }
 
 /// Read a game's saves on every peer in the background; peers without the
@@ -255,6 +262,17 @@ fn newer(report: &Report) -> Option<Side> {
 enum Arrangement {
     Beside,
     Stacked,
+}
+
+/// The date (to the second) of the newest card on the network, when it is
+/// newer than the saves on this device: the cards to flag NEWER.
+fn newest_remote(rows: &[RemoteRow], device: Option<&Stamp>) -> Option<u64> {
+    rows.iter()
+        .flat_map(|row| [row.saves.device, row.saves.backup])
+        .flatten()
+        .filter(|stamp| newer_than(stamp, device))
+        .map(|stamp| stamp.seconds())
+        .max()
 }
 
 /// The focus after a d-pad press, with `rows` machines listed: Right enters
@@ -742,8 +760,11 @@ impl SavesScreen {
 
     fn network<'a>(&'a self, games: &[Game]) -> Network<'a> {
         let busy = self.searching.is_some() || self.reading_remote.is_some();
+        let rows = self.remote_rows(games);
+        let device = self.current(games).and_then(|s| s.report.device.as_ref());
         Network {
-            rows: self.remote_rows(games),
+            rows,
+            newest: newest_remote(rows, device),
             focus: self.focus,
             busy,
             peers: self.peers.sharing.len(),
@@ -855,6 +876,8 @@ fn confirm_or_start(shown: &Shown, title: &str, mut choices: Vec<(&str, Color, C
 /// What the panel shows of the other machines.
 struct Network<'a> {
     rows: &'a [RemoteRow],
+    /// The date of the cards flagged NEWER (see [`newest_remote`]).
+    newest: Option<u64>,
     focus: Focus,
     /// Still searching or reading.
     busy: bool,
@@ -1091,7 +1114,8 @@ fn draw_remote(ui: &Ui, pair: &Pair, remote: &RemoteRow, row: usize, network: &N
             empty
         };
         let stamp = remote.stamp(side);
-        draw_card(ui, r, &label, stamp, empty, false);
+        let newer = stamp.is_some_and(|s| Some(s.seconds()) == network.newest);
+        draw_card(ui, r, &label, stamp, empty, newer);
     }
 }
 
@@ -1332,6 +1356,44 @@ mod tests {
         assert_eq!(clamp(card(2), 2), card(1));
         assert_eq!(clamp(card(0), 0), Focus::List);
         assert_eq!(clamp(Focus::List, 0), Focus::List);
+    }
+
+    fn row(name: &str, device: Option<Stamp>, backup: Option<Stamp>) -> RemoteRow {
+        RemoteRow {
+            peer: Peer {
+                info: ServerInfo::new(name.into(), name.into(), 1),
+                addr: ([127, 0, 0, 1], 1).into(),
+            },
+            saves: RemoteSaves {
+                device,
+                backup,
+                playing: false,
+            },
+        }
+    }
+
+    #[test]
+    fn the_newest_card_on_the_network_is_flagged_when_newer_than_this_device() {
+        let rows = [
+            row("deck", stamp(5), stamp(9)),
+            row("desktop", stamp(9), None),
+            row("laptop", stamp(7), None),
+        ];
+        assert_eq!(newest_remote(&rows, Some(&at(3))), Some(9), "both 9s");
+        assert_eq!(newest_remote(&rows, None), Some(9), "no saves here");
+        assert_eq!(newest_remote(&rows, Some(&at(9))), None, "as new here");
+        assert_eq!(newest_remote(&[], Some(&at(1))), None);
+    }
+
+    #[test]
+    fn machines_are_listed_by_name() {
+        let peers = by_name(
+            ["steamdeck", "Desktop", "box"]
+                .map(|name| row(name, None, None).peer)
+                .to_vec(),
+        );
+        let names: Vec<&str> = peers.iter().map(|p| p.info.name.as_str()).collect();
+        assert_eq!(names, ["box", "Desktop", "steamdeck"]);
     }
 
     #[test]
