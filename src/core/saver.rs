@@ -296,6 +296,20 @@ pub struct Report {
     pub missing: Vec<PathBuf>,
     /// The game has save folders and none of them exist.
     pub none_found: bool,
+    /// Why saves from another machine can't replace the saves here, and
+    /// the backup here ([`cannot_receive`]).
+    pub cannot_receive_saves: Option<String>,
+    pub cannot_receive_backup: Option<String>,
+}
+
+impl Report {
+    /// Why saves from another machine can't replace `into` here, if so.
+    pub fn cannot_receive(&self, into: Side) -> Option<&str> {
+        match into {
+            Side::Device => self.cannot_receive_saves.as_deref(),
+            Side::Backup => self.cannot_receive_backup.as_deref(),
+        }
+    }
 }
 
 const NO_SAVES: &str = "No saves to back up yet.";
@@ -323,6 +337,8 @@ pub fn report(saves: &Saves) -> Report {
     Report {
         missing,
         none_found,
+        cannot_receive_saves: cannot_receive(saves, Side::Device),
+        cannot_receive_backup: cannot_receive(saves, Side::Backup),
         cannot_back_up: refused
             .clone()
             .or_else(|| device.is_none().then_some(empty)),

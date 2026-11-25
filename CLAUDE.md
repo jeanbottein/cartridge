@@ -61,7 +61,7 @@ src/
     form.rs list.rs keyboard.rs browser.rs dialog.rs   # widgets
     network.rs jobs.rs info.rs   # Network tab, background transfers, shared info panel
     mods.rs              # MODS tab: mods with status, A turns one on/off
-    saves.rs             # SAVES tab: device and backup cards of the focused game, A back up / X restore (confirmed); NETWORK cards of peers with the game, by name (Right, d-pad; NEWER on the newest when newer than this device), A gets one as the saves, X as the backup
+    saves.rs             # SAVES tab: device and backup cards of the focused game, A back up / X restore (confirmed); NETWORK cards of peers with the game, by name (Right, d-pad; NEWER on the newest when newer than this device; hints only for copies this device accepts, the note says why not), A gets one as the saves, X as the backup; reopening the tab keeps the last rows while machines are searched again (`generation`)
     app_update.rs        # Settings > APP row: check (on demand, 5 min cooldown), confirm, install in the background, "restart to finish"
     updates.rs           # UPDATES tab: games with a release page; X checks GitHub (only on demand, 5 min cooldown), A updates (confirmed), Y marks installed
     style.rs             # Shared look: backdrop, cards, highlight, panels, bars, toasts, chips, badges

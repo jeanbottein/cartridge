@@ -103,6 +103,15 @@ impl RemoteRow {
 struct Remote {
     folder: String,
     rows: Vec<RemoteRow>,
+    /// The screen's [`SavesScreen::generation`] when the read started.
+    generation: u64,
+}
+
+impl Remote {
+    /// Read for `folder` since the last search and tab opening.
+    fn is_fresh(&self, folder: &str, generation: u64) -> bool {
+        self.folder == folder && self.generation == generation
+    }
 }
 
 /// Where the d-pad is: the game list, or one card of a machine's row.
@@ -134,6 +143,9 @@ pub struct SavesScreen {
     remote: Option<Remote>,
     /// A read of the focused game's saves on every peer (one at a time too).
     reading_remote: Option<Receiver<Remote>>,
+    /// Goes up when the tab is shown and when a search ends: reads made
+    /// before are shown until a new one replaces them, never blanked.
+    generation: u64,
     focus: Focus,
 }
 
@@ -191,7 +203,7 @@ fn by_name(mut peers: Vec<Peer>) -> Vec<Peer> {
 
 /// Read a game's saves on every peer in the background; peers without the
 /// game have no row.
-fn read_remote(folder: &str, peers: &[Peer]) -> Receiver<Remote> {
+fn read_remote(folder: &str, peers: &[Peer], generation: u64) -> Receiver<Remote> {
     let (tx, rx) = channel();
     let (folder, peers) = (folder.to_string(), peers.to_vec());
     std::thread::spawn(move || {
@@ -207,7 +219,11 @@ fn read_remote(folder: &str, peers: &[Peer]) -> Receiver<Remote> {
                 .filter_map(|read| read.join().ok().flatten())
                 .collect()
         });
-        let _ = tx.send(Remote { folder, rows });
+        let _ = tx.send(Remote {
+            folder,
+            rows,
+            generation,
+        });
     });
     rx
 }
@@ -465,6 +481,16 @@ fn note(shown: &Shown) -> Option<&str> {
     backup.or(restore)
 }
 
+/// The note under this device's cards: on a network card, why a copy here
+/// would be refused (the saves' reason covers the backup's); else why
+/// nothing can be done here.
+fn panel_note(shown: &Shown, focus: Focus) -> Option<&str> {
+    match focus {
+        Focus::Card { .. } => shown.report.cannot_receive(Side::Device),
+        Focus::List => note(shown),
+    }
+}
+
 /// A copy from another machine is done: from where, and what wasn't there.
 fn got(title: &str, get: &Get, missing: &[String]) -> String {
     let name = &get.peer.info.name;
@@ -505,8 +531,8 @@ impl SavesScreen {
     /// game may have saved since, a machine come or gone).
     pub fn forget(&mut self) {
         self.shown = None;
-        self.remote = None;
         self.searched = false;
+        self.generation += 1;
         self.focus = Focus::List;
     }
 
@@ -535,7 +561,7 @@ impl SavesScreen {
         if let Some(peers) = self.searching.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.searching = None;
             self.peers = peers;
-            self.remote = None;
+            self.generation += 1;
         }
         if let Some(remote) = self
             .reading_remote
@@ -622,18 +648,25 @@ impl SavesScreen {
         if self.current(games).is_none() && self.reading.is_none() {
             self.reading = Some(read(game, cfg));
         }
-        let known = self
-            .remote
-            .as_ref()
-            .is_some_and(|r| r.folder == game.folder_name);
-        if known || self.reading_remote.is_some() || self.searching.is_some() {
+        let folder = game.folder_name.as_str();
+        let remote = self.remote.as_ref();
+        let fresh = remote.is_some_and(|r| r.is_fresh(folder, self.generation));
+        // Rows already shown for this game wait for the search to end: one
+        // read with the new machines, not one before and one after.
+        let shown = remote.is_some_and(|r| r.folder == folder);
+        if fresh || self.reading_remote.is_some() || (shown && self.searching.is_some()) {
             return;
         }
         if self.peers.sharing.is_empty() {
-            let (folder, rows) = (game.folder_name.clone(), Vec::new());
-            self.remote = Some(Remote { folder, rows });
+            let (folder, rows, generation) = (folder.to_string(), Vec::new(), self.generation);
+            self.remote = Some(Remote {
+                folder,
+                rows,
+                generation,
+            });
         } else {
-            self.reading_remote = Some(read_remote(&game.folder_name, &self.peers.sharing));
+            let read = read_remote(folder, &self.peers.sharing, self.generation);
+            self.reading_remote = Some(read);
         }
     }
 
@@ -684,7 +717,7 @@ impl SavesScreen {
             self.toast.show(why, theme::secondary());
             return;
         };
-        if let Some(why) = saver::cannot_receive(&shown.saves, into) {
+        if let Some(why) = shown.report.cannot_receive(into).map(String::from) {
             self.toast.show(&why, theme::secondary());
             return;
         }
@@ -809,11 +842,21 @@ impl SavesScreen {
                 .get(row)
                 .is_some_and(|r| r.stamp(side).is_some());
             let gets = [
-                ui.hint(Action::Confirm, "Get as saves", theme::danger()),
-                ui.hint(Action::Edit, "Get as backup", theme::accent()),
+                (
+                    Side::Device,
+                    Action::Confirm,
+                    "Get as saves",
+                    theme::danger(),
+                ),
+                (Side::Backup, Action::Edit, "Get as backup", theme::accent()),
             ];
             let back = ui.hint(Action::Left, "Games", theme::muted());
-            return gets.into_iter().filter(|_| offered).chain([back]).collect();
+            return gets
+                .into_iter()
+                .filter(|(into, ..)| offered && shown.report.cannot_receive(*into).is_none())
+                .map(|(_, action, label, color)| ui.hint(action, label, color))
+                .chain([back])
+                .collect();
         }
         let backup = shown
             .report
@@ -949,8 +992,12 @@ fn draw_panel(ui: &Ui, panel: Rect, shown: &Shown, network: &Network) {
     );
     let top = panel.y + 32.0;
     let local = Pair::at(ui, panel, top);
-    let notes: Vec<String> = note(shown)
-        .map(|note| ui.wrap(note, panel.w).into_iter().take(2).collect())
+    let notes: Vec<String> = panel_note(shown, network.focus)
+        .map(|note| {
+            // A long path doesn't wrap: cut at the panel's edge.
+            let lines = ui.wrap(note, panel.w).into_iter().take(2);
+            lines.map(|line| ui.truncate(&line, panel.w)).collect()
+        })
         .unwrap_or_default();
     let header_y = local.bottom() + 20.0 + 20.0 * notes.len() as f32;
     let rows_top = header_y + 8.0 + 16.0 * network.outdated.len() as f32;
@@ -962,14 +1009,12 @@ fn draw_panel(ui: &Ui, panel: Rect, shown: &Shown, network: &Network) {
         Focus::List => None,
     };
     if let (Some(row), 0) = (focused, fit) {
-        draw_remote_rows(ui, panel, top, network, window(row, rows, 1));
+        let y = draw_remote_rows(ui, panel, top, network, window(row, rows, 1));
+        draw_notes(ui, panel, y + 8.0, &notes);
         return;
     }
     draw_local(ui, &local, shown);
-    for (i, line) in notes.iter().enumerate() {
-        let y = local.bottom() + 20.0 + 20.0 * i as f32;
-        ui.text(line, panel.x, y, theme::secondary());
-    }
+    draw_notes(ui, panel, local.bottom() + 20.0, &notes);
     draw_network_header(ui, panel, header_y, network, fit);
     let mut y = match fit {
         0 => rows_top + 12.0,
@@ -995,6 +1040,17 @@ fn draw_panel(ui: &Ui, panel: Rect, shown: &Shown, network: &Network) {
             ui.small_text(&line, panel.x, y, color);
             y += 16.0;
         }
+    }
+}
+
+/// The note's lines from baseline `y`, as many as the panel holds.
+fn draw_notes(ui: &Ui, panel: Rect, y: f32, lines: &[String]) {
+    let baselines = (0..).map(|i| y + 20.0 * i as f32);
+    for (line, y) in lines.iter().zip(baselines) {
+        if y > panel.bottom() {
+            return;
+        }
+        ui.text(line, panel.x, y, theme::secondary());
     }
 }
 
@@ -1038,18 +1094,18 @@ fn draw_local(ui: &Ui, pair: &Pair, shown: &Shown) {
 /// saves.
 fn draw_network_header(ui: &Ui, panel: Rect, y: f32, network: &Network, fit: usize) {
     let rows = network.rows.len();
-    let status = if network.busy {
+    if network.busy {
         draw_spinner(panel.right() - 8.0, y - 5.0, 5.0, theme::accent());
-        String::new()
-    } else if rows > fit {
+    }
+    let status = if rows > fit {
         let machines = if rows == 1 { "machine" } else { "machines" };
         format!("{rows} {machines}: > to see")
-    } else if rows == 0 && network.peers == 0 {
-        "No other •cartridge sharing".into()
-    } else if rows == 0 {
-        "Not on the other machines".into()
-    } else {
+    } else if network.busy || rows > 0 {
         String::new()
+    } else if network.peers == 0 {
+        "No other •cartridge sharing".into()
+    } else {
+        "Not on the other machines".into()
     };
     ui.small_text("NETWORK", panel.x, y, theme::muted());
     let x = panel.x + ui.measure_small("NETWORK  ");
@@ -1184,6 +1240,8 @@ mod tests {
             cannot_restore: None,
             missing: Vec::new(),
             none_found: false,
+            cannot_receive_saves: None,
+            cannot_receive_backup: None,
         }
     }
 
@@ -1280,6 +1338,22 @@ mod tests {
             ..report(stamp(2), None)
         };
         assert!(!unprotected(&refused));
+    }
+
+    #[test]
+    fn on_a_network_card_the_note_says_why_a_copy_here_is_refused() {
+        let prefix = "Launch the game once first.";
+        let refused = shown(Report {
+            cannot_receive_saves: Some(prefix.into()),
+            ..report(stamp(1), None)
+        });
+        let card = Focus::Card {
+            row: 0,
+            side: Side::Device,
+        };
+        assert_eq!(panel_note(&refused, card), Some(prefix));
+        assert_eq!(panel_note(&refused, Focus::List), None, "the cards say it");
+        assert_eq!(panel_note(&shown(report(stamp(1), None)), card), None);
     }
 
     #[test]
@@ -1394,6 +1468,21 @@ mod tests {
         );
         let names: Vec<&str> = peers.iter().map(|p| p.info.name.as_str()).collect();
         assert_eq!(names, ["box", "Desktop", "steamdeck"]);
+    }
+
+    #[test]
+    fn rows_read_before_the_tab_was_shown_again_are_stale() {
+        let remote = Remote {
+            folder: "Game".into(),
+            rows: Vec::new(),
+            generation: 3,
+        };
+        assert!(remote.is_fresh("Game", 3));
+        assert!(
+            !remote.is_fresh("Game", 4),
+            "shown again, or a search ended"
+        );
+        assert!(!remote.is_fresh("Other", 3));
     }
 
     #[test]
