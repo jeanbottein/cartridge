@@ -76,13 +76,14 @@ impl FolderNames {
 }
 
 /// Every file under `root` by relative path. Links are skipped: a save
-/// backup copies the saves, never what a link points to.
+/// backup copies the saves, never what a link points to. So are sockets and
+/// pipes: no game saves in one, and they can't be copied.
 fn file_map(root: &Path) -> BTreeMap<PathBuf, PathBuf> {
     fn walk(dir: &Path, root: &Path, out: &mut BTreeMap<PathBuf, PathBuf>) {
         for path in entries(dir) {
             if path.is_dir() {
                 walk(&path, root, out);
-            } else {
+            } else if path.is_file() {
                 out.insert(path.strip_prefix(root).unwrap_or(&path).to_path_buf(), path);
             }
         }
@@ -414,8 +415,10 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<usize, String> {
             let to = dst.join(from.file_name().unwrap_or_default());
             if from.is_dir() {
                 copy_tree(&from, &to)
-            } else {
+            } else if from.is_file() {
                 copy_file(&from, &to).map(|()| 1)
+            } else {
+                Ok(0) // a socket or a pipe: see `file_map`
             }
         })
         .sum()
@@ -597,8 +600,10 @@ fn append_tree<W: Write>(tar: &mut tar::Builder<W>, dir: &Path, name: &Path) -> 
         let inner = name.join(path.file_name().unwrap_or_default());
         if path.is_dir() {
             append_tree(tar, path, &inner)
-        } else {
+        } else if path.is_file() {
             tar.append_path_with_name(path, &inner)
+        } else {
+            Ok(()) // a socket or a pipe: see `file_map`
         }
     })
 }
@@ -1171,6 +1176,40 @@ mod tests {
             .map(|e| e.unwrap().header().entry_type())
             .collect();
         assert_eq!(kinds, [tar::EntryType::Directory, tar::EntryType::Regular]);
+    }
+
+    /// `dir/live` holding a save, a socket and a named pipe (games and
+    /// launchers leave such files in config folders).
+    #[cfg(unix)]
+    fn live_with_special_files(dir: &TempDir) -> std::os::unix::net::UnixListener {
+        dir.write("live/slot.sav", b"save");
+        let fifo = dir.path().join("live/pipe");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+        assert!(made.unwrap().success());
+        std::os::unix::net::UnixListener::bind(dir.path().join("live/socket")).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sockets_and_pipes_are_neither_sent_nor_backed_up() {
+        let dir = TempDir::new();
+        let _socket = live_with_special_files(&dir);
+        let saves = saves(&dir, &game(&dir, &["live"]));
+
+        let archive = sent(&saves, Side::Device);
+        let mut tar = tar::Archive::new(&archive[..]);
+        let names: Vec<String> = tar
+            .entries()
+            .unwrap()
+            .map(|e| e.unwrap().path().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["live", "live/slot.sav"]);
+        assert_eq!(offered(&saves, Side::Device).map(|s| s.files), Some(1));
+        backup(&saves).unwrap();
+        assert_eq!(
+            paths::sorted_entries(&saves.backup.join("live")),
+            ["slot.sav"]
+        );
     }
 
     #[test]
