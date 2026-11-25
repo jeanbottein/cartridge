@@ -8,9 +8,9 @@
 //!   GET /api/v1/games/{id}/saves/device|backup   saves tar, streamed
 //!
 //! Games are looked up by folder name only; a client path never reaches the
-//! filesystem. The live saves of the game running here are not sent: the
-//! game may be writing them. Installed games are packed on the fly (no temporary file);
-//! packaged-only games send their tar as is.
+//! filesystem. Installed games are packed on the fly (no temporary file);
+//! packaged-only games send their tar as is. The live saves of the game
+//! running here are not sent: the game may be writing them.
 
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};

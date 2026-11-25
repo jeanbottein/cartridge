@@ -188,22 +188,36 @@ fn read_remote(folder: &str, peers: &[Peer]) -> Receiver<Remote> {
     let (tx, rx) = channel();
     let (folder, peers) = (folder.to_string(), peers.to_vec());
     std::thread::spawn(move || {
-        let rows = peers
-            .into_iter()
-            .filter_map(|peer| match client::saves(peer.addr, &folder) {
-                Ok(saves) => Some(RemoteRow {
-                    peer,
-                    saves: saves?,
-                }),
-                Err(e) => {
-                    log::warn!("Saves of {folder} on {}: {e}", peer.info.name);
-                    None
-                }
-            })
-            .collect();
+        // One thread per peer: a machine gone since the search delays the
+        // panel by its timeout once, not once more per machine after it.
+        let rows = std::thread::scope(|scope| {
+            let reads: Vec<_> = peers
+                .into_iter()
+                .map(|peer| scope.spawn(|| remote_row(peer, &folder)))
+                .collect();
+            reads
+                .into_iter()
+                .filter_map(|read| read.join().ok().flatten())
+                .collect()
+        });
         let _ = tx.send(Remote { folder, rows });
     });
     rx
+}
+
+/// `peer`'s saves of `folder`; none when it doesn't have the game or can't
+/// be reached.
+fn remote_row(peer: Peer, folder: &str) -> Option<RemoteRow> {
+    match client::saves(peer.addr, folder) {
+        Ok(saves) => Some(RemoteRow {
+            peer,
+            saves: saves?,
+        }),
+        Err(e) => {
+            log::warn!("Saves of {folder} on {}: {e}", peer.info.name);
+            None
+        }
+    }
 }
 
 fn date(stamp: &Stamp) -> String {
@@ -594,7 +608,13 @@ impl SavesScreen {
             .remote
             .as_ref()
             .is_some_and(|r| r.folder == game.folder_name);
-        if !known && self.reading_remote.is_none() && self.searching.is_none() {
+        if known || self.reading_remote.is_some() || self.searching.is_some() {
+            return;
+        }
+        if self.peers.sharing.is_empty() {
+            let (folder, rows) = (game.folder_name.clone(), Vec::new());
+            self.remote = Some(Remote { folder, rows });
+        } else {
             self.reading_remote = Some(read_remote(&game.folder_name, &self.peers.sharing));
         }
     }
@@ -610,12 +630,14 @@ impl SavesScreen {
                 "Back up",
                 theme::accent(),
             ),
-            _ => (
+            Direction::Restore => (
                 &shown.report.cannot_restore,
                 "Restore saves",
                 "Restore",
                 theme::danger(),
             ),
+            // Copies from another machine ask in `ask_get`.
+            Direction::Get(_) => return,
         };
         if let Some(why) = refusal.clone() {
             self.toast.show(&why, theme::secondary());
@@ -904,47 +926,38 @@ fn draw_panel(ui: &Ui, panel: Rect, shown: &Shown, network: &Network) {
     );
     let top = panel.y + 32.0;
     let local = Pair::at(ui, panel, top);
+    let notes: Vec<String> = note(shown)
+        .map(|note| ui.wrap(note, panel.w).into_iter().take(2).collect())
+        .unwrap_or_default();
+    let header_y = local.bottom() + 20.0 + 20.0 * notes.len() as f32;
+    let rows_top = header_y + 8.0 + 16.0 * network.outdated.len() as f32;
     let step = local.height() + CARD_GAP;
-    let rows_top = local.bottom() + 28.0;
     let fit = ((panel.bottom() - rows_top + CARD_GAP) / step).max(0.0) as usize;
-    let mut y = match network.focus {
-        Focus::Card { row, .. } if fit == 0 => {
-            draw_remote_rows(ui, panel, top, network, window(row, network.rows.len(), 1));
-            return;
-        }
-        Focus::Card { row, .. } => {
-            draw_local(ui, &local, shown);
-            draw_network_header(ui, panel, local.bottom() + 20.0, network, fit);
-            draw_remote_rows(
-                ui,
-                panel,
-                rows_top,
-                network,
-                window(row, network.rows.len(), fit),
-            )
-        }
-        Focus::List => {
-            draw_local(ui, &local, shown);
-            let y = draw_network_header(ui, panel, local.bottom() + 20.0, network, fit);
-            if fit == 0 {
-                y
-            } else {
-                draw_remote_rows(
-                    ui,
-                    panel,
-                    rows_top,
-                    network,
-                    window(0, network.rows.len(), fit),
-                )
-            }
-        }
+    let rows = network.rows.len();
+    let focused = match network.focus {
+        Focus::Card { row, .. } => Some(row),
+        Focus::List => None,
     };
-    if let Some(note) = note(shown) {
-        for line in ui.wrap(note, panel.w).into_iter().take(2) {
-            ui.text(&line, panel.x, y, theme::secondary());
-            y += 20.0;
-        }
+    if let (Some(row), 0) = (focused, fit) {
+        draw_remote_rows(ui, panel, top, network, window(row, rows, 1));
+        return;
     }
+    draw_local(ui, &local, shown);
+    for (i, line) in notes.iter().enumerate() {
+        let y = local.bottom() + 20.0 + 20.0 * i as f32;
+        ui.text(line, panel.x, y, theme::secondary());
+    }
+    draw_network_header(ui, panel, header_y, network, fit);
+    let mut y = match fit {
+        0 => rows_top + 12.0,
+        _ => draw_remote_rows(
+            ui,
+            panel,
+            rows_top,
+            network,
+            window(focused.unwrap_or(0), rows, fit),
+        ),
+    };
     for folder in &shown.saves.folders {
         let color = if shown.report.missing.contains(&folder.device) {
             theme::danger()
@@ -998,15 +1011,16 @@ fn draw_local(ui: &Ui, pair: &Pair, shown: &Shown) {
     );
 }
 
-/// "NETWORK", what is going on, and the machines that can't share saves;
-/// the baseline after it.
-fn draw_network_header(ui: &Ui, panel: Rect, y: f32, network: &Network, fit: usize) -> f32 {
+/// "NETWORK", what is going on, then one line per machine that can't share
+/// saves.
+fn draw_network_header(ui: &Ui, panel: Rect, y: f32, network: &Network, fit: usize) {
     let rows = network.rows.len();
     let status = if network.busy {
         draw_spinner(panel.right() - 8.0, y - 5.0, 5.0, theme::accent());
         String::new()
     } else if rows > fit {
-        format!("{rows} machines: > to see")
+        let machines = if rows == 1 { "machine" } else { "machines" };
+        format!("{rows} {machines}: > to see")
     } else if rows == 0 && network.peers == 0 {
         "No other •cartridge sharing".into()
     } else if rows == 0 {
@@ -1022,17 +1036,11 @@ fn draw_network_header(ui: &Ui, panel: Rect, y: f32, network: &Network, fit: usi
         y,
         theme::muted(),
     );
-    network.outdated.iter().fold(y + 16.0, |y, line| {
-        if y < panel.bottom() {
-            ui.small_text(
-                &ui.truncate_small(line, panel.w),
-                panel.x,
-                y,
-                theme::secondary(),
-            );
-        }
-        y + 16.0
-    })
+    let lines = network.outdated.iter().zip(1..);
+    for (line, i) in lines.take_while(|(_, i)| y + 16.0 * *i as f32 <= panel.bottom()) {
+        let line = ui.truncate_small(line, panel.w);
+        ui.small_text(&line, panel.x, y + 16.0 * i as f32, theme::secondary());
+    }
 }
 
 /// The cards of the machines in `shown`, from `top`; the baseline after them.
