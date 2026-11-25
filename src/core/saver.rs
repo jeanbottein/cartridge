@@ -76,13 +76,14 @@ impl FolderNames {
 }
 
 /// Every file under `root` by relative path. Links are skipped: a save
-/// backup copies the saves, never what a link points to.
+/// backup copies the saves, never what a link points to. So are sockets and
+/// pipes: no game saves in one, and they can't be copied.
 fn file_map(root: &Path) -> BTreeMap<PathBuf, PathBuf> {
     fn walk(dir: &Path, root: &Path, out: &mut BTreeMap<PathBuf, PathBuf>) {
         for path in entries(dir) {
             if path.is_dir() {
                 walk(&path, root, out);
-            } else {
+            } else if path.is_file() {
                 out.insert(path.strip_prefix(root).unwrap_or(&path).to_path_buf(), path);
             }
         }
@@ -414,8 +415,10 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<usize, String> {
             let to = dst.join(from.file_name().unwrap_or_default());
             if from.is_dir() {
                 copy_tree(&from, &to)
-            } else {
+            } else if from.is_file() {
                 copy_file(&from, &to).map(|()| 1)
+            } else {
+                Ok(0) // a socket or a pipe: see `file_map`
             }
         })
         .sum()
@@ -579,9 +582,12 @@ pub fn offered(saves: &Saves, side: Side) -> Option<Stamp> {
 }
 
 /// Write `side` as a tar of `<save folder>/...`: file times kept, links
-/// left out.
+/// left out, only plain files and folders (no GNU sparse entries).
 pub fn send(saves: &Saves, side: Side, out: impl Write) -> io::Result<()> {
     let mut tar = tar::Builder::new(out);
+    // On Linux the writer sends a file with holes (a pre-allocated cache)
+    // as a GNU sparse entry: the first receivers refused those.
+    tar.sparse(false);
     shared_folders(saves, side)
         .iter()
         .try_for_each(|(name, dir)| append_tree(&mut tar, dir, Path::new(name)))?;
@@ -594,8 +600,10 @@ fn append_tree<W: Write>(tar: &mut tar::Builder<W>, dir: &Path, name: &Path) -> 
         let inner = name.join(path.file_name().unwrap_or_default());
         if path.is_dir() {
             append_tree(tar, path, &inner)
-        } else {
+        } else if path.is_file() {
             tar.append_path_with_name(path, &inner)
+        } else {
+            Ok(()) // a socket or a pipe: see `file_map`
         }
     })
 }
@@ -633,7 +641,8 @@ pub fn receive(
 }
 
 /// The archive's plain files and folders into `into`, synced; anything else
-/// (a link, a path out of `into`) refuses the whole archive.
+/// (a link, a path out of `into`) refuses the whole archive. Sparse files
+/// (sent by the first version) are files: `size` is their real size.
 fn unpack_saves(archive: impl Read, into: &Path, limit: u64) -> Result<(), String> {
     std::fs::create_dir_all(into).map_err(io_error(into))?;
     let mut tar = tar::Archive::new(archive);
@@ -643,7 +652,7 @@ fn unpack_saves(archive: impl Read, into: &Path, limit: u64) -> Result<(), Strin
         let mut entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path().map_err(|e| e.to_string())?.into_owned();
         let kind = entry.header().entry_type();
-        if !kind.is_file() && !kind.is_dir() {
+        if !kind.is_file() && !kind.is_gnu_sparse() && !kind.is_dir() {
             return Err(format!("Not a file or a folder: {}", path.display()));
         }
         total += entry.size();
@@ -1145,6 +1154,95 @@ mod tests {
         let mut tar = tar::Builder::new(Vec::new());
         tar.append(&header, &[][..]).unwrap();
         tar.into_inner().unwrap()
+    }
+
+    #[test]
+    fn a_file_with_holes_is_sent_as_a_plain_file() {
+        let dir = TempDir::new();
+        dir.write("there/one/cache.bin", b"data");
+        // Grown with a hole (pre-allocated caches are): on Linux the tar
+        // writer would send it as a GNU sparse entry by default.
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(dir.path().join("there/one/cache.bin"))
+            .unwrap();
+        file.set_len(1 << 20).unwrap();
+        let archive = sent(&there(&dir, &["one"]), Side::Device);
+
+        let mut tar = tar::Archive::new(&archive[..]);
+        let kinds: Vec<tar::EntryType> = tar
+            .entries()
+            .unwrap()
+            .map(|e| e.unwrap().header().entry_type())
+            .collect();
+        assert_eq!(kinds, [tar::EntryType::Directory, tar::EntryType::Regular]);
+    }
+
+    /// `dir/live` holding a save, a socket and a named pipe (games and
+    /// launchers leave such files in config folders).
+    #[cfg(unix)]
+    fn live_with_special_files(dir: &TempDir) -> std::os::unix::net::UnixListener {
+        dir.write("live/slot.sav", b"save");
+        let fifo = dir.path().join("live/pipe");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+        assert!(made.unwrap().success());
+        std::os::unix::net::UnixListener::bind(dir.path().join("live/socket")).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sockets_and_pipes_are_neither_sent_nor_backed_up() {
+        let dir = TempDir::new();
+        let _socket = live_with_special_files(&dir);
+        let saves = saves(&dir, &game(&dir, &["live"]));
+
+        let archive = sent(&saves, Side::Device);
+        let mut tar = tar::Archive::new(&archive[..]);
+        let names: Vec<String> = tar
+            .entries()
+            .unwrap()
+            .map(|e| e.unwrap().path().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["live", "live/slot.sav"]);
+        assert_eq!(offered(&saves, Side::Device).map(|s| s.files), Some(1));
+        backup(&saves).unwrap();
+        assert_eq!(
+            paths::sorted_entries(&saves.backup.join("live")),
+            ["slot.sav"]
+        );
+    }
+
+    #[test]
+    fn a_sparse_file_from_an_earlier_version_is_received_with_its_holes() {
+        let dir = TempDir::new();
+        let saves = saves(&dir, &game(&dir, &["one"]));
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::GNUSparse);
+        header.set_path("one/cache.bin").unwrap();
+        header.set_mode(0o644);
+        header.set_size(5);
+        let gnu = header.as_gnu_mut().unwrap();
+        gnu.sparse[0].set_offset(0);
+        gnu.sparse[0].set_length(5);
+        // A trailing hole ends with an empty chunk at the real size.
+        gnu.sparse[1].set_offset(8);
+        gnu.sparse[1].set_length(0);
+        gnu.set_real_size(8);
+        header.set_cksum();
+        let mut tar = tar::Builder::new(Vec::new());
+        tar.append(&header, &b"hello"[..]).unwrap();
+        let archive = tar.into_inner().unwrap();
+
+        assert_eq!(
+            receive(&saves, Side::Device, &archive[..], 1 << 20),
+            Ok(vec![])
+        );
+        let bytes = std::fs::read(dir.path().join("one/cache.bin")).unwrap();
+        assert_eq!(bytes, b"hello\0\0\0");
+        assert!(
+            receive(&saves, Side::Device, &archive[..], 7).is_err(),
+            "real size counts"
+        );
     }
 
     #[test]
