@@ -728,11 +728,11 @@ impl SavesScreen {
             stamp,
         };
         let copy = copy_of(shown, Direction::Get(get));
-        let (title, label) = match into {
-            Side::Device => ("Get saves", "Replace"),
-            Side::Backup => ("Get backup", "Replace"),
+        let title = match into {
+            Side::Device => "Get saves",
+            Side::Backup => "Get backup",
         };
-        let mut choices = vec![(label, theme::danger(), copy.clone())];
+        let mut choices = vec![("Replace", theme::danger(), copy.clone())];
         if into == Side::Device && unprotected(&shown.report) {
             let first = Copy {
                 backup_first: true,

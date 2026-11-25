@@ -367,7 +367,7 @@ fn refusal(saves: &Saves) -> Option<String> {
 }
 
 /// Why saves can't be written to `into`, if they can't.
-pub fn cannot_receive(saves: &Saves, into: Side) -> Option<String> {
+fn cannot_receive(saves: &Saves, into: Side) -> Option<String> {
     match into {
         Side::Device => refusal(saves).or_else(|| missing_prefix(saves)),
         Side::Backup => refusal(saves),
