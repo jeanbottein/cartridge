@@ -4,9 +4,12 @@
 //!   GET /api/v1/games              [RemoteGame]
 //!   GET /api/v1/games/{id}/cover   cover image
 //!   GET /api/v1/games/{id}/package package tar, streamed
+//!   GET /api/v1/games/{id}/saves   RemoteSaves
+//!   GET /api/v1/games/{id}/saves/device|backup   saves tar, streamed
 //!
 //! Games are looked up by folder name only; a client path never reaches the
-//! filesystem. Installed games are packed on the fly (no temporary file);
+//! filesystem. The live saves of the game running here are not sent: the
+//! game may be writing them. Installed games are packed on the fly (no temporary file);
 //! packaged-only games send their tar as is.
 
 use std::fs::File;
@@ -21,9 +24,10 @@ use std::time::{Duration, Instant};
 use log::{debug, info, warn};
 use serde::Serialize;
 
-use super::{decode_segment, discovery, RemoteGame, ServerInfo};
+use super::{decode_segment, discovery, RemoteGame, RemoteSaves, ServerInfo};
 use crate::core::models::{Game, ImageSlot};
 use crate::core::package::{self, Progress};
+use crate::core::saver::{self, Side};
 use crate::core::scanner;
 
 const MAX_HEAD: u64 = 8 * 1024;
@@ -39,6 +43,16 @@ enum Route {
     Games,
     Cover(String),
     Package(String),
+    Saves(String),
+    SaveCopy(String, Side),
+}
+
+fn side(name: &str) -> Option<Side> {
+    match name {
+        "device" => Some(Side::Device),
+        "backup" => Some(Side::Backup),
+        _ => None,
+    }
 }
 
 /// Parse a request line (`GET /path HTTP/1.1`) into a route.
@@ -61,6 +75,15 @@ fn route(request_line: &str) -> Result<Route, (u16, &'static str)> {
         ["api", "v1", "games", id, "package"] => decode_segment(id)
             .map(Route::Package)
             .ok_or((400, "Bad game id")),
+        ["api", "v1", "games", id, "saves"] => decode_segment(id)
+            .map(Route::Saves)
+            .ok_or((400, "Bad game id")),
+        ["api", "v1", "games", id, "saves", which] => {
+            let side = side(which).ok_or((404, "Not found"))?;
+            decode_segment(id)
+                .map(|id| Route::SaveCopy(id, side))
+                .ok_or((400, "Bad game id"))
+        }
         _ => Err((404, "Not found")),
     }
 }
@@ -68,7 +91,10 @@ fn route(request_line: &str) -> Result<Route, (u16, &'static str)> {
 /// Shared state of a running server.
 pub struct Shared {
     games_dir: PathBuf,
+    saves_root: PathBuf,
     info: ServerInfo,
+    /// Folder name of the game running on this machine.
+    playing: Mutex<Option<String>>,
     stop: AtomicBool,
     /// Packages being sent right now.
     pub sending: AtomicUsize,
@@ -107,14 +133,15 @@ fn bind(ip: IpAddr, port: u16) -> io::Result<(TcpListener, Option<UdpSocket>)> {
 
 impl Server {
     /// Listen on `port` (TCP for HTTP, UDP for discovery) on every interface.
-    pub fn start(games_dir: &Path, name: String, port: u16) -> io::Result<Server> {
-        Server::start_on(games_dir, name, IpAddr::V4(Ipv4Addr::UNSPECIFIED), port)
+    pub fn start(shelf: &Shelf, port: u16) -> io::Result<Server> {
+        Server::start_on(shelf, IpAddr::V4(Ipv4Addr::UNSPECIFIED), port)
     }
 
-    fn start_on(games_dir: &Path, name: String, ip: IpAddr, port: u16) -> io::Result<Server> {
+    fn start_on(shelf: &Shelf, ip: IpAddr, port: u16) -> io::Result<Server> {
         let (listener, udp) = bind(ip, port)?;
         let addr = listener.local_addr()?;
-        let shared = Arc::new(Shared::new(games_dir, ServerInfo::new(name, addr.port())));
+        let info = ServerInfo::new(shelf.name.clone(), shelf.id.clone(), addr.port());
+        let shared = Arc::new(Shared::new(shelf, info));
         let accept_shared = Arc::clone(&shared);
         let mut threads = vec![std::thread::spawn(move || {
             accept_loop(listener, accept_shared)
@@ -131,8 +158,9 @@ impl Server {
             }));
         }
         info!(
-            "Sharing {} as \"{}\" on port {} ({protocols})",
-            games_dir.display(),
+            "Sharing {} and {} as \"{}\" on port {} ({protocols})",
+            shelf.games_dir.display(),
+            shelf.saves_root.display(),
             shared.info.name,
             addr.port()
         );
@@ -154,6 +182,23 @@ impl Server {
     pub fn sending(&self) -> usize {
         self.shared.sending.load(Ordering::Relaxed)
     }
+
+    /// The game running on this machine (its folder name), if any.
+    pub fn set_playing(&self, game: Option<String>) {
+        *self
+            .shared
+            .playing
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = game;
+    }
+}
+
+/// What a server shares, and under which name and id.
+pub struct Shelf {
+    pub games_dir: PathBuf,
+    pub saves_root: PathBuf,
+    pub name: String,
+    pub id: String,
 }
 
 impl Drop for Server {
@@ -169,10 +214,12 @@ impl Drop for Server {
 }
 
 impl Shared {
-    fn new(games_dir: &Path, info: ServerInfo) -> Shared {
+    fn new(shelf: &Shelf, info: ServerInfo) -> Shared {
         Shared {
-            games_dir: games_dir.to_path_buf(),
+            games_dir: shelf.games_dir.clone(),
+            saves_root: shelf.saves_root.clone(),
             info,
+            playing: Mutex::new(None),
             stop: AtomicBool::new(false),
             sending: AtomicUsize::new(0),
             library: Mutex::new(None),
@@ -185,6 +232,11 @@ impl Shared {
 
     pub fn stopped(&self) -> bool {
         self.stop.load(Ordering::Relaxed)
+    }
+
+    fn is_playing(&self, game: &Game) -> bool {
+        let playing = self.playing.lock().unwrap_or_else(|e| e.into_inner());
+        playing.as_deref() == Some(game.folder_name.as_str())
     }
 
     pub fn library(&self) -> Arc<Vec<Game>> {
@@ -280,7 +332,50 @@ fn answer(route: Route, shared: &Shared, peer: &str, out: &mut impl Write) -> io
             }
             None => send_error(out, 404, "No such game"),
         },
+        Route::Saves(id) => match find(shared, &id) {
+            Some(game) => send_json(out, &remote_saves(shared, &game)),
+            None => send_error(out, 404, "No such game"),
+        },
+        Route::SaveCopy(id, side) => match find(shared, &id) {
+            Some(game) => send_saves(out, shared, &game, side, peer),
+            None => send_error(out, 404, "No such game"),
+        },
     }
+}
+
+const PLAYING: &str = "The game is running there: its saves may be changing.";
+
+fn remote_saves(shared: &Shared, game: &Game) -> RemoteSaves {
+    let saves = saver::saves_of(game, &shared.saves_root);
+    let playing = shared.is_playing(game);
+    RemoteSaves {
+        device: saver::offered(&saves, Side::Device).filter(|_| !playing),
+        backup: saver::offered(&saves, Side::Backup),
+        playing,
+    }
+}
+
+fn send_saves(
+    out: &mut impl Write,
+    shared: &Shared,
+    game: &Game,
+    side: Side,
+    peer: &str,
+) -> io::Result<()> {
+    if side == Side::Device && shared.is_playing(game) {
+        return send_error(out, 409, PLAYING);
+    }
+    let saves = saver::saves_of(game, &shared.saves_root);
+    if saver::offered(&saves, side).is_none() {
+        return send_error(out, 404, "No saves");
+    }
+    let what = match side {
+        Side::Device => "saves",
+        Side::Backup => "save backup",
+    };
+    info!("Sending the {what} of {} to {peer}", game.title);
+    write_head(out, 200, "application/x-tar", None)?;
+    saver::send(&saves, side, out)
 }
 
 fn mime_of(name: &str) -> &'static str {
@@ -322,6 +417,7 @@ fn reason(status: u16) -> &'static str {
         400 => "Bad Request",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        409 => "Conflict",
         _ => "Error",
     }
 }
@@ -372,7 +468,8 @@ pub mod tests {
     fn the_library_is_scanned_once_per_burst_of_requests() {
         let dir = TempDir::new();
         dir.mkdir("games/One");
-        let shared = Shared::new(&dir.path().join("games"), ServerInfo::new("t".into(), 1));
+        let shelf = shelf(&dir.path().join("games"));
+        let shared = Shared::new(&shelf, ServerInfo::new("t".into(), "id".into(), 1));
         let start = Instant::now();
         assert_eq!(shared.library_at(start).len(), 1);
 
@@ -387,6 +484,16 @@ pub mod tests {
         assert_eq!(
             route("GET /api/v1/games/My%20Game/package?x=1 HTTP/1.1"),
             Ok(Route::Package("My Game".into()))
+        );
+        assert_eq!(
+            route("GET /api/v1/games/My%20Game/saves/backup HTTP/1.1"),
+            Ok(Route::SaveCopy("My Game".into(), Side::Backup))
+        );
+        assert_eq!(
+            route("GET /api/v1/games/x/saves/other HTTP/1.1")
+                .unwrap_err()
+                .0,
+            404
         );
         assert_eq!(route("POST /api/v1/games HTTP/1.1").unwrap_err().0, 405);
         assert_eq!(route("GET /etc/passwd HTTP/1.1").unwrap_err().0, 404);
@@ -423,9 +530,19 @@ pub mod tests {
         assert!(udp.is_none());
     }
 
+    /// `games_dir`, with the backups next to it.
+    fn shelf(games_dir: &Path) -> Shelf {
+        Shelf {
+            games_dir: games_dir.to_path_buf(),
+            saves_root: games_dir.with_file_name("saves-copies"),
+            name: "test".into(),
+            id: "test-id".into(),
+        }
+    }
+
     /// Loopback only, so tests never open a port on the network.
     pub fn local_server(games_dir: &Path) -> Server {
-        Server::start_on(games_dir, "test".into(), IpAddr::V4(Ipv4Addr::LOCALHOST), 0).unwrap()
+        Server::start_on(&shelf(games_dir), IpAddr::V4(Ipv4Addr::LOCALHOST), 0).unwrap()
     }
 
     fn get(port: u16, path: &str) -> ureq::Response {
@@ -487,12 +604,85 @@ pub mod tests {
     fn restarts_on_the_same_port() {
         let dir = TempDir::new();
         let port = local_server(dir.path()).port();
-        let again = Server::start_on(
-            dir.path(),
-            "x".into(),
-            IpAddr::V4(Ipv4Addr::LOCALHOST),
-            port,
-        );
+        let again = Server::start_on(&shelf(dir.path()), IpAddr::V4(Ipv4Addr::LOCALHOST), port);
         assert_eq!(again.unwrap().port(), port);
+    }
+
+    /// `games/My Game` saving in `live/`, and the server sharing it.
+    fn sharing_saves(dir: &TempDir) -> Server {
+        let mut game = Game::skeleton(&dir.path().join("games/My Game"));
+        game.save_paths = vec![crate::core::models::SavePath {
+            os: String::new(),
+            path: dir.path().join("live").to_string_lossy().into_owned(),
+        }];
+        dir.write(
+            &format!("games/My Game/{GAME_DATA_DIR}/{GAME_JSON}"),
+            game.to_json().as_bytes(),
+        );
+        local_server(&dir.path().join("games"))
+    }
+
+    fn saves_of(port: u16) -> RemoteSaves {
+        let path = format!("/api/v1/games/{}/saves", encode_segment("My Game"));
+        serde_json::from_reader(get(port, &path).into_reader()).unwrap()
+    }
+
+    fn status(port: u16, path: &str) -> u16 {
+        match ureq::get(&format!("http://127.0.0.1:{port}{path}")).call() {
+            Ok(response) => response.status(),
+            Err(ureq::Error::Status(code, _)) => code,
+            Err(e) => panic!("{e}"),
+        }
+    }
+
+    #[test]
+    fn a_games_saves_and_backup_are_listed_and_sent() {
+        let dir = TempDir::new();
+        dir.write("live/slot.sav", b"live");
+        dir.write("saves-copies/My Game/live/slot.sav", b"backup");
+        let server = sharing_saves(&dir);
+
+        let saves = saves_of(server.port());
+        assert_eq!(saves.device.map(|s| s.files), Some(1));
+        assert_eq!(saves.backup.map(|s| s.files), Some(1));
+        assert!(!saves.playing);
+        let path = format!("/api/v1/games/{}/saves/backup", encode_segment("My Game"));
+        let mut archive = tar::Archive::new(get(server.port(), &path).into_reader());
+        let names: Vec<String> = archive
+            .entries()
+            .unwrap()
+            .map(|e| e.unwrap().path().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["live", "live/slot.sav"]);
+    }
+
+    #[test]
+    fn the_saves_of_the_game_running_here_are_not_sent() {
+        let dir = TempDir::new();
+        dir.write("live/slot.sav", b"live");
+        dir.write("saves-copies/My Game/live/slot.sav", b"backup");
+        let server = sharing_saves(&dir);
+        server.set_playing(Some("My Game".into()));
+
+        let saves = saves_of(server.port());
+        assert!(saves.playing && saves.device.is_none() && saves.backup.is_some());
+        let base = format!("/api/v1/games/{}/saves", encode_segment("My Game"));
+        assert_eq!(status(server.port(), &format!("{base}/device")), 409);
+        assert_eq!(status(server.port(), &format!("{base}/backup")), 200);
+        server.set_playing(None);
+        assert_eq!(status(server.port(), &format!("{base}/device")), 200);
+    }
+
+    #[test]
+    fn missing_saves_and_games_are_404() {
+        let dir = TempDir::new();
+        let server = sharing_saves(&dir);
+        let base = format!("/api/v1/games/{}/saves", encode_segment("My Game"));
+        assert_eq!(status(server.port(), &format!("{base}/device")), 404);
+        assert_eq!(status(server.port(), "/api/v1/games/Nope/saves"), 404);
+        assert_eq!(
+            status(server.port(), "/api/v1/games/..%2F..%2Fetc/saves/device"),
+            404
+        );
     }
 }

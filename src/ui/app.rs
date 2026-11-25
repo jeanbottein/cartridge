@@ -312,9 +312,17 @@ impl App {
             return;
         }
         self.server = None; // free the port before binding it again
-        self.server = Server::start(&games_dir, share::machine_name(), port)
+        self.server = Server::start(&share::shelf(cfg, &games_dir), port)
             .map_err(|e| log::error!("Cannot share on port {port}: {e}"))
             .ok();
+        self.sync_playing();
+    }
+
+    /// Tell the sharing server which game runs here: its saves aren't sent.
+    fn sync_playing(&self) {
+        if let Some(server) = &self.server {
+            server.set_playing(self.session.as_ref().map(|s| s.folder.clone()));
+        }
     }
 
     /// Re-read `config.txt` (after Settings changed it).
@@ -373,6 +381,7 @@ impl App {
         self.collect_runs();
 
         if let Some(ended) = self.session.take_if(|s| !s.running()) {
+            self.sync_playing();
             if let Some(message) = ended.error() {
                 self.library.toast.show(&message, theme::danger());
             }
@@ -748,7 +757,10 @@ impl App {
         }
         let games_dir = self.config.as_ref().and_then(Config::games_dir);
         match event {
-            library::Event::Launched(session) => self.session = Some(session),
+            library::Event::Launched(session) => {
+                self.session = Some(session);
+                self.sync_playing();
+            }
             library::Event::Edit(index) => {
                 if let (Some(game), Some(cfg)) = (self.library.games.get(index), &self.config) {
                     self.editor = Some(Editor::new(game, cfg));

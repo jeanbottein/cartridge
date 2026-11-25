@@ -1,9 +1,12 @@
 //! SAVES: each game's saves on this machine and in its backup, side by side
 //! like two memory cards. A backs the focused game's saves up, X restores
-//! its backup, both after a confirmation when they replace something. Only
-//! the focused game's folders are read, in the background; copies run in
-//! the background too, behind a modal that keeps the user (and a game
-//! launch) out until they end.
+//! its backup, both after a confirmation when they replace something.
+//!
+//! Under them, NETWORK: the same two cards for each other •cartridge
+//! sharing this game. Right moves into them, the d-pad picks one; A gets it
+//! as the saves here, X as the backup here. Only the focused game's folders
+//! are read, in the background; copies run in the background too, behind a
+//! modal that keeps the user (and a game launch) out until they end.
 
 use std::sync::mpsc::{channel, Receiver};
 
@@ -17,26 +20,34 @@ use super::style::{self, Toast};
 use super::{centered, draw_spinner, Hint, Ui};
 use crate::core::config::Config;
 use crate::core::models::Game;
-use crate::core::saver::{self, Report, Saves, Stamp};
+use crate::core::saver::{self, Report, Saves, Side, Stamp};
+use crate::core::share::discovery::Peer;
+use crate::core::share::{self, client, RemoteSaves};
 use crate::core::sizer;
 
 const ROW_H: f32 = 26.0;
 const ROW_STEP: f32 = 30.0;
 const GAP: f32 = 12.0;
 const CARD_H: f32 = 66.0;
+const CARD_GAP: f32 = 8.0;
 /// The panel under the list when there is no room beside it.
 const BELOW_H: f32 = 120.0;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Direction {
     Backup,
     Restore,
+    Get(Get),
 }
 
-#[derive(Debug, PartialEq)]
-enum Side {
-    Device,
-    Backup,
+/// A copy from another machine: which of its sides, into which side here.
+#[derive(Clone)]
+struct Get {
+    peer: Peer,
+    side: Side,
+    into: Side,
+    /// What its listing announced.
+    stamp: Stamp,
 }
 
 /// The focused game's saves, as last read.
@@ -47,17 +58,62 @@ struct Shown {
     report: Report,
 }
 
-/// A backup or restore of one game's saves.
+/// A copy of one game's saves.
+#[derive(Clone)]
 struct Copy {
     direction: Direction,
     saves: Saves,
+    folder: String,
     title: String,
+    /// Back the saves here up before the copy replaces them.
+    backup_first: bool,
 }
 
-/// A copy waiting for the user's yes, with the saves it was asked for.
+/// A copy waiting for the user's yes: one copy per option, Cancel last.
 struct Confirm {
     dialog: Dialog,
-    copy: Copy,
+    choices: Vec<Copy>,
+}
+
+/// Other machines found on the network.
+#[derive(Default)]
+struct Peers {
+    /// Those sharing saves.
+    sharing: Vec<Peer>,
+    /// Why the others can't, one line each.
+    outdated: Vec<String>,
+}
+
+/// One machine's saves of the focused game.
+struct RemoteRow {
+    peer: Peer,
+    saves: RemoteSaves,
+}
+
+impl RemoteRow {
+    fn stamp(&self, side: Side) -> Option<&Stamp> {
+        match side {
+            Side::Device => self.saves.device.as_ref(),
+            Side::Backup => self.saves.backup.as_ref(),
+        }
+    }
+}
+
+/// The focused game's saves on other machines, as last read.
+struct Remote {
+    folder: String,
+    rows: Vec<RemoteRow>,
+}
+
+/// Where the d-pad is: the game list, or one card of a machine's row.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Focus {
+    #[default]
+    List,
+    Card {
+        row: usize,
+        side: Side,
+    },
 }
 
 #[derive(Default)]
@@ -67,10 +123,18 @@ pub struct SavesScreen {
     /// A read of one game's folders running in the background (one at a
     /// time: holding Down doesn't start one per game).
     reading: Option<Receiver<Shown>>,
-    /// A backup or restore running; its result message.
+    /// A backup, restore or copy running; its result message.
     copying: Option<Receiver<Result<String, String>>>,
     confirm: Option<Confirm>,
     toast: Toast,
+    /// Searched once each time the tab is shown.
+    searched: bool,
+    searching: Option<Receiver<Peers>>,
+    peers: Peers,
+    remote: Option<Remote>,
+    /// A read of the focused game's saves on every peer (one at a time too).
+    reading_remote: Option<Receiver<Remote>>,
+    focus: Focus,
 }
 
 /// Read a game's save folders and backup in the background.
@@ -94,6 +158,54 @@ fn read(game: &Game, cfg: &Config) -> Receiver<Shown> {
     rx
 }
 
+/// Find the other machines in the background.
+fn search(cfg: &Config) -> Receiver<Peers> {
+    let (tx, rx) = channel();
+    let cfg = cfg.clone();
+    std::thread::spawn(move || {
+        let (sharing, older): (Vec<Peer>, Vec<Peer>) = client::find_peers(&cfg)
+            .into_iter()
+            .partition(|peer| peer.info.mismatch().is_none() && peer.info.has(share::SAVES));
+        let outdated = older
+            .iter()
+            .map(|peer| {
+                peer.info.mismatch().unwrap_or_else(|| {
+                    format!(
+                        "{} runs an older •cartridge: update it to copy saves",
+                        peer.info.name
+                    )
+                })
+            })
+            .collect();
+        let _ = tx.send(Peers { sharing, outdated });
+    });
+    rx
+}
+
+/// Read a game's saves on every peer in the background; peers without the
+/// game have no row.
+fn read_remote(folder: &str, peers: &[Peer]) -> Receiver<Remote> {
+    let (tx, rx) = channel();
+    let (folder, peers) = (folder.to_string(), peers.to_vec());
+    std::thread::spawn(move || {
+        let rows = peers
+            .into_iter()
+            .filter_map(|peer| match client::saves(peer.addr, &folder) {
+                Ok(saves) => Some(RemoteRow {
+                    peer,
+                    saves: saves?,
+                }),
+                Err(e) => {
+                    log::warn!("Saves of {folder} on {}: {e}", peer.info.name);
+                    None
+                }
+            })
+            .collect();
+        let _ = tx.send(Remote { folder, rows });
+    });
+    rx
+}
+
 fn date(stamp: &Stamp) -> String {
     chrono::DateTime::<chrono::Local>::from(stamp.modified)
         .format("%Y-%m-%d %H:%M:%S")
@@ -108,59 +220,200 @@ fn contents(stamp: &Stamp) -> String {
     format!("{files} · {}", sizer::human(stamp.bytes))
 }
 
+/// `a` holds newer files than `b`, or `b` holds none. To the second: what
+/// a copy between machines keeps.
+fn newer_than(a: &Stamp, b: Option<&Stamp>) -> bool {
+    b.is_none_or(|b| a.seconds() > b.seconds())
+}
+
 /// The side whose newest file is more recent, when they differ.
 fn newer(report: &Report) -> Option<Side> {
-    let (device, backup) = (report.device?.modified, report.backup?.modified);
-    match device.cmp(&backup) {
+    let (device, backup) = (report.device?, report.backup?);
+    match device.seconds().cmp(&backup.seconds()) {
         std::cmp::Ordering::Greater => Some(Side::Device),
         std::cmp::Ordering::Less => Some(Side::Backup),
         std::cmp::Ordering::Equal => None,
     }
 }
 
+/// How a machine's two cards sit: the d-pad follows what the eye sees.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Arrangement {
+    Beside,
+    Stacked,
+}
+
+/// The focus after a d-pad press, with `rows` machines listed: Right enters
+/// the first machine's saves, Left from them goes back to the list.
+fn step(focus: Focus, action: Action, rows: usize, arrangement: Arrangement) -> Focus {
+    match arrangement {
+        Arrangement::Beside => step_beside(focus, action, rows),
+        Arrangement::Stacked => step_stacked(focus, action, rows),
+    }
+}
+
+/// Left/Right between a machine's saves and backup, Up/Down between machines.
+fn step_beside(focus: Focus, action: Action, rows: usize) -> Focus {
+    let last = rows.saturating_sub(1);
+    match (focus, action) {
+        (Focus::List, Action::Right) if rows > 0 => Focus::Card {
+            row: 0,
+            side: Side::Device,
+        },
+        (
+            Focus::Card {
+                side: Side::Device, ..
+            },
+            Action::Left,
+        ) => Focus::List,
+        (Focus::Card { row, .. }, Action::Left) => Focus::Card {
+            row,
+            side: Side::Device,
+        },
+        (Focus::Card { row, .. }, Action::Right) => Focus::Card {
+            row,
+            side: Side::Backup,
+        },
+        (Focus::Card { row, side }, Action::Up) => Focus::Card {
+            row: row.saturating_sub(1),
+            side,
+        },
+        (Focus::Card { row, side }, Action::Down) => Focus::Card {
+            row: (row + 1).min(last),
+            side,
+        },
+        _ => focus,
+    }
+}
+
+/// Up/Down through every card in turn (saves, backup, next machine...),
+/// Left back to the list.
+fn step_stacked(focus: Focus, action: Action, rows: usize) -> Focus {
+    let card = |index: usize| Focus::Card {
+        row: index / 2,
+        side: if index.is_multiple_of(2) {
+            Side::Device
+        } else {
+            Side::Backup
+        },
+    };
+    let Focus::Card { row, side } = focus else {
+        return step_beside(focus, action, rows);
+    };
+    let index = row * 2 + usize::from(side == Side::Backup);
+    match action {
+        Action::Left => Focus::List,
+        Action::Up => card(index.saturating_sub(1)),
+        Action::Down => card((index + 1).min(rows * 2 - 1)),
+        _ => focus,
+    }
+}
+
+/// The focus kept on a row that still exists, or back on the list.
+fn clamp(focus: Focus, rows: usize) -> Focus {
+    match focus {
+        Focus::Card { .. } if rows == 0 => Focus::List,
+        Focus::Card { row, side } => Focus::Card {
+            row: row.min(rows - 1),
+            side,
+        },
+        Focus::List => Focus::List,
+    }
+}
+
+/// The rows shown when `fit` fit (at least the focused one), scrolled so
+/// the focused row is one of them.
+fn window(focused: usize, rows: usize, fit: usize) -> std::ops::Range<usize> {
+    let fit = fit.max(1);
+    let first = (focused + 1).saturating_sub(fit);
+    first..rows.min(first + fit)
+}
+
 /// What a confirmation says before replacing one side with the other: the
 /// question, both dates on their own lines, then what will be lost.
-fn question(shown: &Shown, direction: Direction) -> String {
+fn question(shown: &Shown, direction: &Direction) -> String {
     let report = &shown.report;
-    let newer = newer(report);
-    let (ask, warning) = match direction {
+    let side = |stamp: Option<&Stamp>| stamp.map_or("none".into(), date);
+    let title = &shown.title;
+    let (ask, here, there, warning) = match direction {
         Direction::Backup => (
-            format!(
-                "Replace the backup of {} with the saves on this device?",
-                shown.title
-            ),
-            (newer == Some(Side::Backup)).then_some("The backup is newer: it will be lost."),
+            format!("Replace the backup of {title} with the saves on this device?"),
+            format!("Device: {}", side(report.device.as_ref())),
+            format!("Backup: {}", side(report.backup.as_ref())),
+            (newer(report) == Some(Side::Backup))
+                .then_some("The backup is newer: it will be lost."),
         ),
         Direction::Restore => (
-            format!(
-                "Replace the saves of {} on this device with the backup?",
-                shown.title
-            ),
-            Some(if newer == Some(Side::Device) {
+            format!("Replace the saves of {title} on this device with the backup?"),
+            format!("Device: {}", side(report.device.as_ref())),
+            format!("Backup: {}", side(report.backup.as_ref())),
+            Some(if newer(report) == Some(Side::Device) {
                 "The saves on this device are newer: they will be lost. Close the game first."
             } else {
                 "Close the game first."
             }),
         ),
+        Direction::Get(get) => {
+            let name = &get.peer.info.name;
+            let what = match get.side {
+                Side::Device => "the saves",
+                Side::Backup => "the backup",
+            };
+            let there = format!("{name}: {}", date(&get.stamp));
+            match get.into {
+                Side::Device => (
+                    format!("Replace the saves of {title} on this device with {what} on {name}?"),
+                    format!("This device: {}", side(report.device.as_ref())),
+                    there,
+                    Some(
+                        if report
+                            .device
+                            .is_some_and(|d| newer_than(&d, Some(&get.stamp)))
+                        {
+                            "The saves on this device are newer: they will be lost. Close the game first."
+                        } else {
+                            "Close the game first."
+                        },
+                    ),
+                ),
+                Side::Backup => (
+                    format!("Replace the backup of {title} with {what} on {name}?"),
+                    format!("Backup: {}", side(report.backup.as_ref())),
+                    there,
+                    report
+                        .backup
+                        .is_some_and(|b| newer_than(&b, Some(&get.stamp)))
+                        .then_some("The backup is newer: it will be lost."),
+                ),
+            }
+        }
     };
-    let side = |stamp: Option<Stamp>| stamp.as_ref().map_or("none".into(), date);
-    [
-        ask,
-        format!("Device: {}", side(report.device)),
-        format!("Backup: {}", side(report.backup)),
-    ]
-    .into_iter()
-    .chain(warning.map(String::from))
-    .collect::<Vec<_>>()
-    .join("\n")
+    [ask, here, there]
+        .into_iter()
+        .chain(warning.map(String::from))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The side a copy writes holds nothing yet: no need to confirm.
-fn replaces_nothing(report: &Report, direction: Direction) -> bool {
-    match direction {
-        Direction::Backup => report.backup.is_none(),
-        Direction::Restore => report.device.is_none(),
+fn replaces_nothing(report: &Report, direction: &Direction) -> bool {
+    let into = match direction {
+        Direction::Backup => Side::Backup,
+        Direction::Restore => Side::Device,
+        Direction::Get(get) => get.into,
+    };
+    match into {
+        Side::Backup => report.backup.is_none(),
+        Side::Device => report.device.is_none(),
     }
+}
+
+/// The saves here would be lost for good if replaced: no backup holds them.
+fn unprotected(report: &Report) -> bool {
+    report.cannot_back_up.is_none()
+        && report
+            .device
+            .is_some_and(|d| newer_than(&d, report.backup.as_ref()))
 }
 
 /// Why nothing can be done, when the cards don't already say it.
@@ -180,16 +433,49 @@ fn note(shown: &Shown) -> Option<&str> {
     backup.or(restore)
 }
 
+/// A copy from another machine is done: from where, and what wasn't there.
+fn got(title: &str, get: &Get, missing: &[String]) -> String {
+    let name = &get.peer.info.name;
+    let done = match get.into {
+        Side::Device => format!("{title}: saves from {name}."),
+        Side::Backup => format!("{title}: backup from {name}. X to restore it."),
+    };
+    if missing.is_empty() {
+        return done;
+    }
+    format!("{done} Not on {name}: {}.", missing.join(", "))
+}
+
+fn run(copy: &Copy) -> Result<String, String> {
+    let (saves, title) = (&copy.saves, &copy.title);
+    match &copy.direction {
+        Direction::Backup => saver::backup(saves).map(|()| format!("{title}: backed up.")),
+        Direction::Restore => saver::restore(saves).map(|()| format!("{title}: backup restored.")),
+        Direction::Get(get) => {
+            if copy.backup_first {
+                saver::backup(saves)?;
+            }
+            let (addr, bytes) = (get.peer.addr, get.stamp.bytes);
+            client::copy_saves(addr, &copy.folder, get.side, saves, get.into, bytes)
+                .map(|missing| got(title, get, &missing))
+        }
+    }
+    .map_err(|e| format!("{title}: {e}"))
+}
+
 impl SavesScreen {
     /// A dialog or a copy is up: tabs and Back stay with this screen.
     pub fn has_modal(&self) -> bool {
         self.confirm.is_some() || self.copying.is_some()
     }
 
-    /// Read the focused game again when the tab is shown (a game may have
-    /// saved since).
+    /// Read the focused game and the network again when the tab is shown (a
+    /// game may have saved since, a machine come or gone).
     pub fn forget(&mut self) {
         self.shown = None;
+        self.remote = None;
+        self.searched = false;
+        self.focus = Focus::List;
     }
 
     fn current<'a>(&'a self, games: &[Game]) -> Option<&'a Shown> {
@@ -199,11 +485,33 @@ impl SavesScreen {
             .filter(|s| s.folder == focused.folder_name)
     }
 
-    /// Collect a finished read or copy; a copy is followed by a fresh read.
+    /// The focused game's rows on other machines, once read.
+    fn remote_rows(&self, games: &[Game]) -> &[RemoteRow] {
+        let focused = games.get(self.list.cursor).map(|g| g.folder_name.as_str());
+        self.remote
+            .as_ref()
+            .filter(|r| Some(r.folder.as_str()) == focused)
+            .map_or(&[], |r| &r.rows)
+    }
+
+    /// Collect finished reads and copies; a copy is followed by a fresh read.
     pub fn poll(&mut self) {
         if let Some(shown) = self.reading.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.reading = None;
             self.shown = Some(shown);
+        }
+        if let Some(peers) = self.searching.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.searching = None;
+            self.peers = peers;
+            self.remote = None;
+        }
+        if let Some(remote) = self
+            .reading_remote
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok())
+        {
+            self.reading_remote = None;
+            self.remote = Some(remote);
         }
         let Some(result) = self.copying.as_ref().and_then(|rx| rx.try_recv().ok()) else {
             return;
@@ -223,24 +531,55 @@ impl SavesScreen {
         if let Some(confirm) = &mut self.confirm {
             match confirm.dialog.update(ui, area) {
                 Outcome::Open => {}
-                Outcome::Chosen(0) => {
-                    if let Some(confirm) = self.confirm.take() {
-                        self.start_copy(confirm.copy);
+                Outcome::Chosen(i) => {
+                    if let Some(copy) = self
+                        .confirm
+                        .take()
+                        .and_then(|c| c.choices.into_iter().nth(i))
+                    {
+                        self.start_copy(copy);
                     }
                 }
-                Outcome::Chosen(_) | Outcome::Cancelled => self.confirm = None,
+                Outcome::Cancelled => self.confirm = None,
             }
             return;
         }
-        // The library may have lost games since.
+        if !self.searched {
+            self.searched = true;
+            self.searching = Some(search(cfg));
+        }
+        // The library may have lost games since, a machine its saves.
         self.list.select(self.list.cursor, games.len(), |_| true);
-        let (list, _) = layout(ui, area);
-        let backup = self.list.update(ui, games.len(), list, ROW_STEP, |_| true);
+        let rows = self.remote_rows(games).len();
+        self.focus = clamp(self.focus, rows);
+        let arrangement = Pair::at(ui, layout(ui, area).1, 0.0).arrangement();
+        match self.focus {
+            Focus::List => self.update_list(ui, area, games),
+            Focus::Card { row, side } => self.update_cards(ui, games, row, side),
+        }
+        self.focus = [Action::Left, Action::Right, Action::Up, Action::Down]
+            .into_iter()
+            .filter(|action| ui.action(*action))
+            .fold(self.focus, |focus, action| {
+                step(focus, action, rows, arrangement)
+            });
         self.read_focused(games, cfg);
-        if backup {
+    }
+
+    fn update_list(&mut self, ui: &Ui, area: Rect, games: &[Game]) {
+        let (list, _) = layout(ui, area);
+        if self.list.update(ui, games.len(), list, ROW_STEP, |_| true) {
             self.ask(games, Direction::Backup);
         } else if ui.action(Action::Edit) {
             self.ask(games, Direction::Restore);
+        }
+    }
+
+    fn update_cards(&mut self, ui: &Ui, games: &[Game], row: usize, side: Side) {
+        if ui.action(Action::Confirm) {
+            self.ask_get(games, row, side, Side::Device);
+        } else if ui.action(Action::Edit) {
+            self.ask_get(games, row, side, Side::Backup);
         }
     }
 
@@ -250,6 +589,13 @@ impl SavesScreen {
         };
         if self.current(games).is_none() && self.reading.is_none() {
             self.reading = Some(read(game, cfg));
+        }
+        let known = self
+            .remote
+            .as_ref()
+            .is_some_and(|r| r.folder == game.folder_name);
+        if !known && self.reading_remote.is_none() && self.searching.is_none() {
+            self.reading_remote = Some(read_remote(&game.folder_name, &self.peers.sharing));
         }
     }
 
@@ -264,7 +610,7 @@ impl SavesScreen {
                 "Back up",
                 theme::accent(),
             ),
-            Direction::Restore => (
+            _ => (
                 &shown.report.cannot_restore,
                 "Restore saves",
                 "Restore",
@@ -275,40 +621,67 @@ impl SavesScreen {
             self.toast.show(&why, theme::secondary());
             return;
         }
-        let copy = Copy {
-            direction,
-            saves: shown.saves.clone(),
-            title: shown.title.clone(),
+        let next = confirm_or_start(
+            shown,
+            title,
+            vec![(label, color, copy_of(shown, direction))],
+        );
+        self.start(next);
+    }
+
+    /// Get `side` of the machine on `row` into `into` here.
+    fn ask_get(&mut self, games: &[Game], row: usize, side: Side, into: Side) {
+        let (Some(shown), Some(remote)) = (self.current(games), self.remote_rows(games).get(row))
+        else {
+            return;
         };
-        if replaces_nothing(&shown.report, direction) {
-            self.start_copy(copy);
+        let Some(stamp) = remote.stamp(side).copied() else {
+            let why = if side == Side::Device && remote.saves.playing {
+                "The game is running there: close it first."
+            } else {
+                "Nothing to copy there."
+            };
+            self.toast.show(why, theme::secondary());
+            return;
+        };
+        if let Some(why) = saver::cannot_receive(&shown.saves, into) {
+            self.toast.show(&why, theme::secondary());
             return;
         }
-        self.confirm = Some(Confirm {
-            dialog: Dialog::new(
-                title,
-                &question(shown, direction),
-                &[(label, color), ("Cancel", theme::muted())],
-            ),
-            copy,
-        });
+        let get = Get {
+            peer: remote.peer.clone(),
+            side,
+            into,
+            stamp,
+        };
+        let copy = copy_of(shown, Direction::Get(get));
+        let (title, label) = match into {
+            Side::Device => ("Get saves", "Replace"),
+            Side::Backup => ("Get backup", "Replace"),
+        };
+        let mut choices = vec![(label, theme::danger(), copy.clone())];
+        if into == Side::Device && unprotected(&shown.report) {
+            let first = Copy {
+                backup_first: true,
+                ..copy
+            };
+            choices.insert(0, ("Back up mine, then get", theme::accent(), first));
+        }
+        let next = confirm_or_start(shown, title, choices);
+        self.start(next);
+    }
+
+    fn start(&mut self, next: Next) {
+        match next {
+            Next::Copy(copy) => self.start_copy(*copy),
+            Next::Confirm(confirm) => self.confirm = Some(confirm),
+        }
     }
 
     fn start_copy(&mut self, copy: Copy) {
-        let Copy {
-            direction,
-            saves,
-            title,
-        } = copy;
         let (tx, rx) = channel();
         std::thread::spawn(move || {
-            let result = match direction {
-                Direction::Backup => saver::backup(&saves).map(|()| format!("{title}: backed up.")),
-                Direction::Restore => {
-                    saver::restore(&saves).map(|()| format!("{title}: backup restored."))
-                }
-            };
-            let _ = tx.send(result.map_err(|e| format!("{title}: {e}")));
+            let _ = tx.send(run(&copy));
         });
         self.copying = Some(rx);
     }
@@ -325,7 +698,7 @@ impl SavesScreen {
             self.draw_row(ui, &games[i], i, Rect::new(r.x, r.y, r.w, ROW_H));
         }
         match self.current(games) {
-            Some(shown) => draw_panel(ui, panel, shown),
+            Some(shown) => draw_panel(ui, panel, shown, &self.network(games)),
             None => {
                 draw_spinner(panel.x + 6.0, panel.y + 24.0, 6.0, theme::accent());
                 ui.text(
@@ -345,6 +718,17 @@ impl SavesScreen {
         }
     }
 
+    fn network<'a>(&'a self, games: &[Game]) -> Network<'a> {
+        let busy = self.searching.is_some() || self.reading_remote.is_some();
+        Network {
+            rows: self.remote_rows(games),
+            focus: self.focus,
+            busy,
+            peers: self.peers.sharing.len(),
+            outdated: &self.peers.outdated,
+        }
+    }
+
     fn draw_row(&self, ui: &Ui, game: &Game, i: usize, frame: Rect) {
         let focused = i == self.list.cursor;
         let stripe = if focused {
@@ -352,7 +736,7 @@ impl SavesScreen {
         } else {
             theme::secondary()
         };
-        style::card(frame, stripe, focused);
+        style::card(frame, stripe, focused && self.focus == Focus::List);
         let color = if focused {
             theme::text()
         } else {
@@ -376,6 +760,18 @@ impl SavesScreen {
         let Some(shown) = self.current(games) else {
             return Vec::new();
         };
+        if let Focus::Card { row, side } = self.focus {
+            let offered = self
+                .remote_rows(games)
+                .get(row)
+                .is_some_and(|r| r.stamp(side).is_some());
+            let gets = [
+                ui.hint(Action::Confirm, "Get as saves", theme::danger()),
+                ui.hint(Action::Edit, "Get as backup", theme::accent()),
+            ];
+            let back = ui.hint(Action::Left, "Games", theme::muted());
+            return gets.into_iter().filter(|_| offered).chain([back]).collect();
+        }
         let backup = shown
             .report
             .cannot_back_up
@@ -386,8 +782,63 @@ impl SavesScreen {
             .cannot_restore
             .is_none()
             .then(|| ui.hint(Action::Edit, "Restore", theme::danger()));
-        backup.into_iter().chain(restore).collect()
+        let network = (!self.remote_rows(games).is_empty())
+            .then(|| ui.hint(Action::Right, "Network", theme::muted()));
+        backup.into_iter().chain(restore).chain(network).collect()
     }
+}
+
+fn copy_of(shown: &Shown, direction: Direction) -> Copy {
+    Copy {
+        direction,
+        saves: shown.saves.clone(),
+        folder: shown.folder.clone(),
+        title: shown.title.clone(),
+        backup_first: false,
+    }
+}
+
+/// A copy to start, or the question to ask first.
+enum Next {
+    Copy(Box<Copy>),
+    Confirm(Confirm),
+}
+
+/// Ask which of `choices` to run, unless the last one (the plain copy)
+/// replaces nothing: it runs without a question then.
+fn confirm_or_start(shown: &Shown, title: &str, mut choices: Vec<(&str, Color, Copy)>) -> Next {
+    let replaces = choices
+        .last()
+        .is_some_and(|(_, _, plain)| !replaces_nothing(&shown.report, &plain.direction));
+    if !replaces {
+        if let Some((_, _, plain)) = choices.pop() {
+            return Next::Copy(Box::new(plain));
+        }
+    }
+    let message = choices
+        .last()
+        .map(|(_, _, plain)| question(shown, &plain.direction))
+        .unwrap_or_default();
+    let options: Vec<(&str, Color)> = choices
+        .iter()
+        .map(|(label, color, _)| (*label, *color))
+        .chain([("Cancel", theme::muted())])
+        .collect();
+    Next::Confirm(Confirm {
+        dialog: Dialog::new(title, &message, &options),
+        choices: choices.into_iter().map(|(_, _, copy)| copy).collect(),
+    })
+}
+
+/// What the panel shows of the other machines.
+struct Network<'a> {
+    rows: &'a [RemoteRow],
+    focus: Focus,
+    /// Still searching or reading.
+    busy: bool,
+    /// Machines sharing saves.
+    peers: usize,
+    outdated: &'a [String],
 }
 
 /// (list, panel): the panel beside the list, or under it on narrow screens.
@@ -401,9 +852,50 @@ fn layout(ui: &Ui, area: Rect) -> (Rect, Rect) {
     }
 }
 
-/// The game's title, its two cards (stacked, or side by side when wide
-/// enough), then what stops a copy and where the saves are.
-fn draw_panel(ui: &Ui, panel: Rect, shown: &Shown) {
+/// A pair of cards (one machine's saves and backup) at `top`: side by side
+/// when wide enough, else stacked.
+struct Pair {
+    left: Rect,
+    right: Rect,
+}
+
+impl Pair {
+    fn at(ui: &Ui, panel: Rect, top: f32) -> Pair {
+        let card_w = ui.measure("0000-00-00 00:00:00") + 24.0;
+        if panel.w >= 2.0 * card_w + GAP {
+            let w = (panel.w - GAP) / 2.0;
+            return Pair {
+                left: Rect::new(panel.x, top, w, CARD_H),
+                right: Rect::new(panel.x + w + GAP, top, w, CARD_H),
+            };
+        }
+        Pair {
+            left: Rect::new(panel.x, top, panel.w, CARD_H),
+            right: Rect::new(panel.x, top + CARD_H + CARD_GAP, panel.w, CARD_H),
+        }
+    }
+
+    fn bottom(&self) -> f32 {
+        self.right.bottom()
+    }
+
+    fn arrangement(&self) -> Arrangement {
+        if self.left.y == self.right.y {
+            Arrangement::Beside
+        } else {
+            Arrangement::Stacked
+        }
+    }
+
+    fn height(&self) -> f32 {
+        self.right.bottom() - self.left.y
+    }
+}
+
+/// The game's title, its two cards, the other machines' cards, then what
+/// stops a copy and where the saves are. On a short panel focused on the
+/// network, a machine's cards take the place of this device's.
+fn draw_panel(ui: &Ui, panel: Rect, shown: &Shown, network: &Network) {
     ui.title(
         &ui.truncate(&shown.title, panel.w),
         panel.x,
@@ -411,52 +903,42 @@ fn draw_panel(ui: &Ui, panel: Rect, shown: &Shown) {
         theme::text(),
     );
     let top = panel.y + 32.0;
-    let card_w = ui.measure("0000-00-00 00:00:00") + 24.0;
-    let beside = panel.w >= 2.0 * card_w + GAP;
-    let (device, backup) = if beside {
-        let w = (panel.w - GAP) / 2.0;
-        (
-            Rect::new(panel.x, top, w, CARD_H),
-            Rect::new(panel.x + w + GAP, top, w, CARD_H),
-        )
-    } else {
-        (
-            Rect::new(panel.x, top, panel.w, CARD_H),
-            Rect::new(panel.x, top + CARD_H + 8.0, panel.w, CARD_H),
-        )
+    let local = Pair::at(ui, panel, top);
+    let step = local.height() + CARD_GAP;
+    let rows_top = local.bottom() + 28.0;
+    let fit = ((panel.bottom() - rows_top + CARD_GAP) / step).max(0.0) as usize;
+    let mut y = match network.focus {
+        Focus::Card { row, .. } if fit == 0 => {
+            draw_remote_rows(ui, panel, top, network, window(row, network.rows.len(), 1));
+            return;
+        }
+        Focus::Card { row, .. } => {
+            draw_local(ui, &local, shown);
+            draw_network_header(ui, panel, local.bottom() + 20.0, network, fit);
+            draw_remote_rows(
+                ui,
+                panel,
+                rows_top,
+                network,
+                window(row, network.rows.len(), fit),
+            )
+        }
+        Focus::List => {
+            draw_local(ui, &local, shown);
+            let y = draw_network_header(ui, panel, local.bottom() + 20.0, network, fit);
+            if fit == 0 {
+                y
+            } else {
+                draw_remote_rows(
+                    ui,
+                    panel,
+                    rows_top,
+                    network,
+                    window(0, network.rows.len(), fit),
+                )
+            }
+        }
     };
-    let newer = newer(&shown.report);
-    let device_label = if shown.saves.in_game {
-        "IN GAME"
-    } else {
-        "THIS DEVICE"
-    };
-    let no_path = shown.saves.folders.is_empty();
-    let device_empty = if no_path {
-        "NO SAVE PATH"
-    } else if shown.report.none_found {
-        "NOT FOUND"
-    } else {
-        "NO SAVE"
-    };
-    draw_card(
-        ui,
-        device,
-        device_label,
-        shown.report.device.as_ref(),
-        device_empty,
-        newer == Some(Side::Device),
-    );
-    let backup_empty = if no_path { "NO SAVE PATH" } else { "NO BACKUP" };
-    draw_card(
-        ui,
-        backup,
-        "BACKUP",
-        shown.report.backup.as_ref(),
-        backup_empty,
-        newer == Some(Side::Backup),
-    );
-    let mut y = backup.bottom() + 20.0;
     if let Some(note) = note(shown) {
         for line in ui.wrap(note, panel.w).into_iter().take(2) {
             ui.text(&line, panel.x, y, theme::secondary());
@@ -480,12 +962,147 @@ fn draw_panel(ui: &Ui, panel: Rect, shown: &Shown) {
     }
 }
 
+fn draw_local(ui: &Ui, pair: &Pair, shown: &Shown) {
+    let newer = newer(&shown.report);
+    let device_label = if shown.saves.in_game {
+        "IN GAME"
+    } else {
+        "THIS DEVICE"
+    };
+    let no_path = shown.saves.folders.is_empty();
+    let device_empty = if no_path {
+        "NO SAVE PATH"
+    } else if shown.report.none_found {
+        "NOT FOUND"
+    } else {
+        "NO SAVE"
+    };
+    style::well(pair.left);
+    draw_card(
+        ui,
+        pair.left,
+        device_label,
+        shown.report.device.as_ref(),
+        device_empty,
+        newer == Some(Side::Device),
+    );
+    let backup_empty = if no_path { "NO SAVE PATH" } else { "NO BACKUP" };
+    style::well(pair.right);
+    draw_card(
+        ui,
+        pair.right,
+        "BACKUP",
+        shown.report.backup.as_ref(),
+        backup_empty,
+        newer == Some(Side::Backup),
+    );
+}
+
+/// "NETWORK", what is going on, and the machines that can't share saves;
+/// the baseline after it.
+fn draw_network_header(ui: &Ui, panel: Rect, y: f32, network: &Network, fit: usize) -> f32 {
+    let rows = network.rows.len();
+    let status = if network.busy {
+        draw_spinner(panel.right() - 8.0, y - 5.0, 5.0, theme::accent());
+        String::new()
+    } else if rows > fit {
+        format!("{rows} machines: > to see")
+    } else if rows == 0 && network.peers == 0 {
+        "No other •cartridge sharing".into()
+    } else if rows == 0 {
+        "Not on the other machines".into()
+    } else {
+        String::new()
+    };
+    ui.small_text("NETWORK", panel.x, y, theme::muted());
+    let x = panel.x + ui.measure_small("NETWORK  ");
+    ui.small_text(
+        &ui.truncate_small(&status, panel.right() - x),
+        x,
+        y,
+        theme::muted(),
+    );
+    network.outdated.iter().fold(y + 16.0, |y, line| {
+        if y < panel.bottom() {
+            ui.small_text(
+                &ui.truncate_small(line, panel.w),
+                panel.x,
+                y,
+                theme::secondary(),
+            );
+        }
+        y + 16.0
+    })
+}
+
+/// The cards of the machines in `shown`, from `top`; the baseline after them.
+fn draw_remote_rows(
+    ui: &Ui,
+    panel: Rect,
+    top: f32,
+    network: &Network,
+    shown: std::ops::Range<usize>,
+) -> f32 {
+    let mut y = top;
+    for row in shown {
+        let pair = Pair::at(ui, panel, y);
+        draw_remote(ui, &pair, &network.rows[row], row, network);
+        y = pair.bottom() + CARD_GAP;
+    }
+    y + 12.0
+}
+
+fn draw_remote(ui: &Ui, pair: &Pair, remote: &RemoteRow, row: usize, network: &Network) {
+    let name = remote.peer.info.name.to_uppercase();
+    let count = network.rows.len();
+    let place = if count > 1 {
+        format!(" {}/{count}", row + 1)
+    } else {
+        String::new()
+    };
+    let cards = [
+        (pair.left, Side::Device, format!("{name}{place}"), "NO SAVE"),
+        (
+            pair.right,
+            Side::Backup,
+            format!("{name} BACKUP"),
+            "NO BACKUP",
+        ),
+    ];
+    for (r, side, label, empty) in cards {
+        let focused = network.focus == Focus::Card { row, side };
+        let stripe = if focused {
+            theme::accent()
+        } else {
+            theme::secondary()
+        };
+        style::card(r, stripe, focused);
+        let empty = if side == Side::Device && remote.saves.playing {
+            "PLAYING"
+        } else {
+            empty
+        };
+        let stamp = remote.stamp(side);
+        draw_card(ui, r, &label, stamp, empty, false);
+    }
+}
+
+/// A card's label, NEWER chip, then its date and contents (or `empty`).
 fn draw_card(ui: &Ui, r: Rect, label: &str, stamp: Option<&Stamp>, empty: &str, newer: bool) {
-    style::well(r);
     let x = r.x + 10.0;
-    ui.small_text(label, x, r.y + 16.0, theme::muted());
+    let chip_w = if newer {
+        style::chip_width(ui, "NEWER") + 10.0
+    } else {
+        0.0
+    };
+    ui.small_text(
+        &ui.truncate_small(label, r.w - 20.0 - chip_w),
+        x,
+        r.y + 16.0,
+        theme::muted(),
+    );
     if newer {
-        let chip_x = r.right() - 10.0 - style::chip_width(ui, "NEWER");
+        let chip_x = r.right() - chip_w;
         style::chip(ui, "NEWER", chip_x, r.y + 16.0, theme::accent());
     }
     match stamp {
@@ -512,14 +1129,19 @@ fn draw_copying(ui: &Ui, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::share::ServerInfo;
     use std::time::{Duration, SystemTime};
 
-    fn stamp(secs: u64) -> Option<Stamp> {
-        Some(Stamp {
+    fn at(secs: u64) -> Stamp {
+        Stamp {
             modified: SystemTime::UNIX_EPOCH + Duration::from_secs(secs),
             files: 1,
             bytes: 1,
-        })
+        }
+    }
+
+    fn stamp(secs: u64) -> Option<Stamp> {
+        Some(at(secs))
     }
 
     fn report(device: Option<Stamp>, backup: Option<Stamp>) -> Report {
@@ -533,6 +1155,29 @@ mod tests {
         }
     }
 
+    fn shown(report: Report) -> Shown {
+        let dir = crate::core::testutil::TempDir::new();
+        let game = Game::skeleton(&dir.path().join("games/Game"));
+        Shown {
+            folder: "Game".into(),
+            title: "SomeGame".into(),
+            saves: saver::saves_of(&game, &dir.path().join("saves-copies")),
+            report,
+        }
+    }
+
+    fn get(into: Side, secs: u64) -> Direction {
+        Direction::Get(Get {
+            peer: Peer {
+                info: ServerInfo::new("deck".into(), "id".into(), 1),
+                addr: ([127, 0, 0, 1], 1).into(),
+            },
+            side: Side::Device,
+            into,
+            stamp: at(secs),
+        })
+    }
+
     #[test]
     fn the_newer_side_is_the_one_with_the_most_recent_file() {
         assert_eq!(newer(&report(stamp(2), stamp(1))), Some(Side::Device));
@@ -542,30 +1187,164 @@ mod tests {
     }
 
     #[test]
-    fn restoring_over_newer_saves_says_they_will_be_lost() {
-        let dir = crate::core::testutil::TempDir::new();
-        let game = Game::skeleton(&dir.path().join("games/Game"));
-        let shown = Shown {
-            folder: "Game".into(),
-            title: "SomeGame".into(),
-            saves: saver::saves_of(&game, &dir.path().join("saves-copies")),
-            report: report(stamp(2), stamp(1)),
+    fn sides_within_the_same_second_are_as_new() {
+        let copied = Stamp {
+            modified: at(5).modified + Duration::from_millis(900),
+            ..at(5)
         };
-        let restore = question(&shown, Direction::Restore);
+        assert_eq!(newer(&report(Some(copied), stamp(5))), None);
+        assert!(!newer_than(&copied, Some(&at(5))));
+        assert!(newer_than(&at(5), None));
+    }
+
+    #[test]
+    fn restoring_over_newer_saves_says_they_will_be_lost() {
+        let shown = shown(report(stamp(2), stamp(1)));
+        let restore = question(&shown, &Direction::Restore);
         assert_eq!(restore.lines().count(), 4);
         assert!(restore.ends_with("they will be lost. Close the game first."));
-        assert_eq!(question(&shown, Direction::Backup).lines().count(), 3);
+        assert_eq!(question(&shown, &Direction::Backup).lines().count(), 3);
+    }
+
+    #[test]
+    fn getting_saves_names_the_machine_and_what_is_lost() {
+        let shown = shown(report(stamp(9), stamp(1)));
+        let into_saves = question(&shown, &get(Side::Device, 5));
+        assert!(into_saves
+            .starts_with("Replace the saves of SomeGame on this device with the saves on deck?"));
+        assert!(into_saves.contains("\ndeck: "));
+        assert!(into_saves.ends_with("they will be lost. Close the game first."));
+        let into_backup = question(&shown, &get(Side::Backup, 5));
+        assert!(into_backup.starts_with("Replace the backup of SomeGame with the saves on deck?"));
+        assert_eq!(
+            into_backup.lines().count(),
+            3,
+            "the backup is older: nothing lost"
+        );
     }
 
     #[test]
     fn only_a_copy_over_something_needs_a_confirmation() {
         let first_backup = report(stamp(1), None);
-        assert!(replaces_nothing(&first_backup, Direction::Backup));
+        assert!(replaces_nothing(&first_backup, &Direction::Backup));
+        assert!(replaces_nothing(&first_backup, &get(Side::Backup, 1)));
         let fresh_install = report(None, stamp(1));
-        assert!(replaces_nothing(&fresh_install, Direction::Restore));
+        assert!(replaces_nothing(&fresh_install, &Direction::Restore));
+        assert!(replaces_nothing(&fresh_install, &get(Side::Device, 1)));
         let both = report(stamp(1), stamp(1));
-        assert!(!replaces_nothing(&both, Direction::Backup));
-        assert!(!replaces_nothing(&both, Direction::Restore));
+        assert!(!replaces_nothing(&both, &Direction::Backup));
+        assert!(!replaces_nothing(&both, &Direction::Restore));
+        assert!(!replaces_nothing(&both, &get(Side::Device, 1)));
+    }
+
+    #[test]
+    fn saves_newer_than_their_backup_are_offered_a_backup_first() {
+        assert!(unprotected(&report(stamp(2), stamp(1))));
+        assert!(unprotected(&report(stamp(2), None)));
+        assert!(!unprotected(&report(stamp(1), stamp(1))));
+        assert!(!unprotected(&report(None, stamp(1))));
+        let refused = Report {
+            cannot_back_up: Some("no".into()),
+            ..report(stamp(2), None)
+        };
+        assert!(!unprotected(&refused));
+    }
+
+    #[test]
+    fn the_dpad_moves_between_the_list_and_each_machines_cards() {
+        let card = |row, side| Focus::Card { row, side };
+        let step = |focus, action, rows| step(focus, action, rows, Arrangement::Beside);
+        assert_eq!(step(Focus::List, Action::Right, 0), Focus::List);
+        assert_eq!(step(Focus::List, Action::Right, 2), card(0, Side::Device));
+        assert_eq!(
+            step(card(0, Side::Device), Action::Right, 2),
+            card(0, Side::Backup)
+        );
+        assert_eq!(
+            step(card(0, Side::Backup), Action::Right, 2),
+            card(0, Side::Backup)
+        );
+        assert_eq!(
+            step(card(0, Side::Backup), Action::Down, 2),
+            card(1, Side::Backup)
+        );
+        assert_eq!(
+            step(card(1, Side::Backup), Action::Down, 2),
+            card(1, Side::Backup)
+        );
+        assert_eq!(
+            step(card(1, Side::Backup), Action::Up, 2),
+            card(0, Side::Backup)
+        );
+        assert_eq!(
+            step(card(0, Side::Backup), Action::Left, 2),
+            card(0, Side::Device)
+        );
+        assert_eq!(step(card(0, Side::Device), Action::Left, 2), Focus::List);
+    }
+
+    #[test]
+    fn stacked_cards_are_walked_top_to_bottom() {
+        let card = |row, side| Focus::Card { row, side };
+        let step = |focus, action| step(focus, action, 2, Arrangement::Stacked);
+        assert_eq!(step(Focus::List, Action::Right), card(0, Side::Device));
+        assert_eq!(
+            step(card(0, Side::Device), Action::Down),
+            card(0, Side::Backup)
+        );
+        assert_eq!(
+            step(card(0, Side::Backup), Action::Down),
+            card(1, Side::Device)
+        );
+        assert_eq!(
+            step(card(1, Side::Backup), Action::Down),
+            card(1, Side::Backup)
+        );
+        assert_eq!(
+            step(card(1, Side::Device), Action::Up),
+            card(0, Side::Backup)
+        );
+        assert_eq!(
+            step(card(0, Side::Device), Action::Up),
+            card(0, Side::Device)
+        );
+        assert_eq!(
+            step(card(1, Side::Backup), Action::Right),
+            card(1, Side::Backup)
+        );
+        assert_eq!(step(card(1, Side::Backup), Action::Left), Focus::List);
+    }
+
+    #[test]
+    fn the_focus_follows_machines_that_go_away() {
+        let card = |row| Focus::Card {
+            row,
+            side: Side::Backup,
+        };
+        assert_eq!(clamp(card(2), 2), card(1));
+        assert_eq!(clamp(card(0), 0), Focus::List);
+        assert_eq!(clamp(Focus::List, 0), Focus::List);
+    }
+
+    #[test]
+    fn a_short_panel_shows_the_focused_machine() {
+        assert_eq!(window(0, 3, 0), 0..1, "no room: still the focused one");
+        assert_eq!(window(2, 3, 1), 2..3);
+        assert_eq!(window(2, 3, 2), 1..3);
+        assert_eq!(window(0, 3, 5), 0..3);
+    }
+
+    #[test]
+    fn a_copy_from_a_machine_says_what_was_not_there() {
+        let Direction::Get(from) = get(Side::Backup, 1) else {
+            unreachable!()
+        };
+        assert_eq!(
+            got("SomeGame", &from, &[]),
+            "SomeGame: backup from deck. X to restore it."
+        );
+        let partial = got("SomeGame", &from, &["Saves_2".into()]);
+        assert!(partial.ends_with("Not on deck: Saves_2."));
     }
 
     #[test]

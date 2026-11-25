@@ -41,12 +41,12 @@ src/
     migrations.rs scanner.rs detector.rs sgdb.rs persister.rs sizer.rs
     package.rs           # Foo.cartridge.tar: pack/unpack with progress + crc verification
     links.rs             # symlinks in games (unpack, updates): where the fs refuses them (FAT/exFAT, Windows), a copy of the target
-    share/               # LAN sharing: server.rs (HTTP, GET only), discovery.rs (UDP broadcast), client.rs
+    share/               # LAN sharing: server.rs (HTTP, GET only: games, and each game's saves/backup as a tar), discovery.rs (UDP broadcast), client.rs; peers carry their cartridge id (own server filtered out) and features
     vdf.rs               # Binary (shortcuts.vdf) + text (config.vdf) KeyValues
     steam/               # users, selection (steam.json), host (detect/restart), shortcuts (vdf), clean, export, compat (Proton builds)
     steam_self.rs manifest.rs bps.rs
     removal.rs           # editor: reset game.json (AppID kept) for a new detection + enrichment; delete a game (hidden staging rename, removed in the background, leftovers swept at start; the UI takes it out of Steam too)
-    saver.rs             # SAVES: saves-copies/<game folder>/<save folder>/; backup under a hidden name, renamed once complete; restore empties then copies
+    saver.rs             # SAVES: saves-copies/<game folder>/<save folder>/; backup under a hidden name, renamed once complete; restore empties then copies; send/receive another machine's saves or backup (tar of plain files, unpacked hidden, then a restore or a backup swap)
     save_links.rs        # optional saves-links/ symlink tree (not built for now; silent where links fail, folder only with a link)
     proton.rs            # Windows games with Steam's Proton + runtime, in the shortcut's compatdata prefix; winetricks
     patcher.rs mods.rs   # mod file engine (state/apply/restore) + mod model (list, on/off)
@@ -61,7 +61,7 @@ src/
     form.rs list.rs keyboard.rs browser.rs dialog.rs   # widgets
     network.rs jobs.rs info.rs   # Network tab, background transfers, shared info panel
     mods.rs              # MODS tab: mods with status, A turns one on/off
-    saves.rs             # SAVES tab: device and backup cards of the focused game, A back up / X restore (confirmed)
+    saves.rs             # SAVES tab: device and backup cards of the focused game, A back up / X restore (confirmed); NETWORK cards of peers with the game (Right, d-pad), A gets one as the saves, X as the backup
     app_update.rs        # Settings > APP row: check (on demand, 5 min cooldown), confirm, install in the background, "restart to finish"
     updates.rs           # UPDATES tab: games with a release page; X checks GitHub (only on demand, 5 min cooldown), A updates (confirmed), Y marks installed
     style.rs             # Shared look: backdrop, cards, highlight, panels, bars, toasts, chips, badges
@@ -89,7 +89,7 @@ Packages: a plain tar of `Foo/` with `.cartridge/package.json` first and `.cartr
 
 ## Key Conventions
 
-- **Versions, newer vs older apps:** bump `models::SCHEMA_VERSION` on any change to what game.json holds: an older app reads a newer game.json but never writes it (`Game::is_writable`; migrations skip it too), since it would drop what it doesn't know. Package `FORMAT` only for the tar layout, share `PROTOCOL` only for the HTTP API; peers of another protocol are listed by name with which side to update.
+- **Versions, newer vs older apps:** bump `models::SCHEMA_VERSION` on any change to what game.json holds: an older app reads a newer game.json but never writes it (`Game::is_writable`; migrations skip it too), since it would drop what it doesn't know. Package `FORMAT` only for the tar layout, share `PROTOCOL` only for incompatible HTTP API changes; peers of another protocol are listed by name with which side to update. A route added without breaking older apps goes in `ServerInfo.features` instead (e.g. `saves`), so a peer lacking it is told to update.
 - **Self-update:** `CARTRIDGE_REPO` (`owner/name`) is baked in at build time (`option_env!`, set to `github.repository` in release.yml, passed by container.sh); without it there's no APP section. The version is the release tag (`v1.2.3` → `CARTRIDGE_VERSION`, baked in the same way, tag format checked in CI); Cargo.toml's version is only the fallback for local builds. The app is found in the release archive by its `app_name` (`Cartridge.AppImage` / `Cartridge.app` / `cartridge.exe`).
 - **Compatibility is the contract:** game.json (4-space JSON), shortcuts.vdf, AppIDs (`crc32(exe+title) | 0x80000000`, computed once and kept in game.json `steam_appid` so a rename keeps the shortcut, Proton prefix and saves: always go through `steam::appid_for`/`appid_of`), path normalization must stay byte-compatible with existing cartridges. Save backups are `saves-copies/<game folder>/<save folder>/` (folder names survive a rename). Golden tests in `testdata/` guard this.
 - **Fixed layout, no path settings:** `games/`, `mods/`, `saves-copies/` sit next to `system/` (`core::app::FOLDERS`, `Config::games_dir()`/`mods_dir()`/...). Users who want a folder elsewhere replace it with a symlink.
@@ -100,6 +100,7 @@ Packages: a plain tar of `Foo/` with `.cartridge/package.json` first and `.cartr
 - **Debug mode:** a file named `debug` next to the app (`core::app::debug_mode`) shows Settings > DEBUG; `DEBUG_*` keys apply only then. They are interface-only (`DEBUG_FAKE_PROGRESS` loops a fake progress card, drawn by the UI; the autopilot never sees it).
 - Flags: `is_true` for opt-in keys (STEAM_ADD_SELF, SHARE_ENABLED, ...), `is_not_false` for opt-out keys (MANIFEST_EXPORT, MUSIC_ENABLED).
 - **Steam, per game:** the user adds/removes each game (Library, Y), remembered in `system/steam.json`; the pipeline keeps exactly those shortcuts current. Ownership tag `cartridge:<id>` (`system/cartridge-id`) plus the folder-name label as a visible tag; the self-shortcut (`STEAM_ADD_SELF`, first SETTINGS option) uses `<owner tag>-self` and is applied as soon as it's toggled. Steam reads shortcuts at startup: the UI says "restart Steam" when it runs.
+- **Saves between machines:** matched by game folder and save folder names. The server never sends the live saves of the game running there (the UI tells it via `Server::set_playing`) nor those behind an unsafe save path; the client unpacks only plain files under a hidden name, then replaces the saves (all of `restore`'s checks) or the backup. Getting saves newer than their backup offers "Back up mine, then get". File times survive a copy to the second: sides compare in whole seconds (`Stamp::seconds`).
 - **Shared files:** the autopilot runs while the UI stays usable, so every writer of Steam's files takes `steam::files_lock()` and every mod apply/restore takes the lock in `mods`. Opening the editor pauses the autopilot.
 - **Logging:** `log` macros; `core::logging` prints to stderr, or to the systemd journal (`journalctl --user -t cartridge`) when stderr is no terminal; the UI toasts warnings and errors. No log file.
 - **Game updates:** `"update": {url, asset, installed, build}` in game.json (omitted when empty). `url` is a GitHub project page; `asset` an optional part of the release file name (else picked from the target's os/arch, Flatpak skipped); `installed` the tag last installed; `build` that file's fingerprint (GitHub sha256 digest, else upload date), so rolling releases (`ci-dev-build`, `nightly`) update when CI rebuilds; empty compares the tag only. An update is an upsert like a Windows installer: archive files are added or replaced, nothing is deleted (saves, configs, ROMs, mods stay). An archive that only wraps another (zip holding a .tar.gz) is unpacked twice; a release file that is the program itself (`.AppImage`, Linux x64 unless named otherwise; also zipped alone when the target is an AppImage) replaces the target's executable, and is preferred over an archive when the target is an AppImage. The autopilot pauses while one runs.
