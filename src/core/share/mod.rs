@@ -7,6 +7,7 @@ pub mod server;
 
 use std::cmp::Ordering;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
@@ -32,14 +33,22 @@ pub fn port(cfg: &Config) -> u16 {
 }
 
 /// What this cartridge shares: its games and save backups, under the host
-/// name and its cartridge id.
+/// name and this run's id.
 pub fn shelf(cfg: &Config, games_dir: &Path) -> server::Shelf {
     server::Shelf {
         games_dir: games_dir.to_path_buf(),
         saves_root: cfg.saves_copies_dir(),
         name: machine_name(),
-        id: cfg.cartridge_id(),
+        id: instance_id().to_string(),
     }
+}
+
+/// This run's id, new at each start: tells this app's own server from the
+/// others when it answers discovery. Not the cartridge id: a cartridge
+/// copied whole to another machine keeps that one.
+pub fn instance_id() -> &'static str {
+    static ID: OnceLock<String> = OnceLock::new();
+    ID.get_or_init(super::app::new_id)
 }
 
 /// Name shown to other machines: the host name.
@@ -105,8 +114,8 @@ pub struct ServerInfo {
     pub port: u16,
     pub version: String,
     pub protocol: u32,
-    /// The cartridge id (`system/cartridge-id`): this machine's own server
-    /// answers discovery too. Empty from older versions.
+    /// The server's [`instance_id`]: this app's own server answers
+    /// discovery too. Empty from older versions.
     #[serde(default)]
     pub id: String,
     #[serde(default)]
@@ -183,6 +192,15 @@ mod tests {
         assert!(info.mismatch().unwrap().contains("update this one"));
         info.protocol = PROTOCOL - 1;
         assert!(info.mismatch().unwrap().contains("update it"));
+    }
+
+    #[test]
+    fn the_shared_id_is_this_runs_not_the_cartridges() {
+        let cfg = Config::from_raw("/ws/system/config.txt".into(), Default::default());
+        let shelf = shelf(&cfg, Path::new("/ws/games"));
+        assert_eq!(shelf.id, instance_id());
+        assert_eq!(instance_id(), instance_id());
+        assert_eq!(instance_id().len(), 32);
     }
 
     #[test]

@@ -137,7 +137,7 @@ pub fn label(cartridge_dir: &Path) -> String {
         .unwrap_or_else(|| DISPLAY_NAME.to_string())
 }
 
-fn new_id() -> String {
+pub(crate) fn new_id() -> String {
     use std::hash::{BuildHasher, Hasher};
     // Two independently seeded hashes: unpredictable enough for an identity.
     let part = || {

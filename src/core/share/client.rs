@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::discovery::{self, Peer};
-use super::{encode_segment, port, RemoteGame, RemoteSaves, ServerInfo};
+use super::{encode_segment, instance_id, port, RemoteGame, RemoteSaves, ServerInfo};
 use crate::core::config::Config;
 use crate::core::package::{self, Progress};
 use crate::core::saver::{self, Saves, Side};
@@ -102,20 +102,19 @@ fn configured_peers(cfg: &Config) -> Vec<Peer> {
 }
 
 /// Servers answering the LAN broadcast, plus the configured ones; not this
-/// cartridge's own server, which answers too.
+/// app's own server, which answers too.
 pub fn find_peers(cfg: &Config) -> Vec<Peer> {
     let found = discovery::discover(port(cfg), Duration::from_secs(1));
     let configured = configured_peers(cfg);
-    let own = cfg.cartridge_id();
     distinct(found.into_iter().chain(configured))
         .into_iter()
-        .filter(|peer| peer.info.id != own)
+        .filter(|peer| peer.info.id != instance_id())
         .collect()
 }
 
 /// Each server once: one found by broadcast and listed in SHARE_PEERS, or
-/// reached at two addresses, is the same cartridge id (older servers have
-/// none: told apart by address only).
+/// reached at two addresses, has the same id (older servers have none:
+/// told apart by address only).
 fn distinct(peers: impl IntoIterator<Item = Peer>) -> Vec<Peer> {
     let same =
         |a: &Peer, b: &Peer| a.addr == b.addr || (!a.info.id.is_empty() && a.info.id == b.info.id);

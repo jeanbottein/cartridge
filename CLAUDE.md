@@ -41,7 +41,7 @@ src/
     migrations.rs scanner.rs detector.rs sgdb.rs persister.rs sizer.rs
     package.rs           # Foo.cartridge.tar: pack/unpack with progress + crc verification
     links.rs             # symlinks in games (unpack, updates): where the fs refuses them (FAT/exFAT, Windows), a copy of the target
-    share/               # LAN sharing: server.rs (HTTP, GET only: games, and each game's saves/backup as a tar), discovery.rs (UDP broadcast), client.rs; peers carry their cartridge id (own server filtered out) and features
+    share/               # LAN sharing: server.rs (HTTP, GET only: games, and each game's saves/backup as a tar), discovery.rs (UDP broadcast), client.rs; peers carry a per-run id (`share::instance_id`: own server filtered out, duplicates merged; not the cartridge id, which a copied cartridge shares) and features
     vdf.rs               # Binary (shortcuts.vdf) + text (config.vdf) KeyValues
     steam/               # users, selection (steam.json), host (detect/restart), shortcuts (vdf), clean, export, compat (Proton builds)
     steam_self.rs manifest.rs bps.rs
