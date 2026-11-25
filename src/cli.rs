@@ -49,7 +49,7 @@ Files:
 Main settings:
   STEAM_ADD_SELF=True            Add the cartridge itself (named after DIR)
   STEAMGRIDDB_API_KEY=<key>      Artwork, names and years from SteamGridDB
-  SHARE_ENABLED=True             Share games on the LAN while the UI runs
+  SHARE_ENABLED=True             Share games and their saves on the LAN while the UI runs
   SHARE_PORT=47800               TCP + UDP port used for sharing
   SHARE_PEERS=host[:port],...    Peers the LAN broadcast can't reach
 

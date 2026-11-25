@@ -6,13 +6,20 @@
 //! hidden name and only takes the real one once complete, so a failed copy
 //! never passes for a backup. A restore empties the save folders and copies
 //! the backup in: the user chose to replace their saves.
+//!
+//! Another machine's saves or backup arrive as a tar of `<save folder>/...`
+//! ([`send`], [`receive`]), under a hidden name until the whole archive is
+//! here, then replace the saves or the backup like a restore or a backup.
 
 use std::collections::{BTreeMap, HashSet};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use serde::{Deserialize, Serialize};
+
 use super::models::{Game, Install};
-use super::{package, paths, steam};
+use super::{package, paths, sizer, steam};
 
 const WINDOWS_RESERVED: [&str; 22] = [
     "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
@@ -234,14 +241,32 @@ fn is_mount_point(_dir: &Path) -> bool {
     false
 }
 
+/// Which copy of a game's saves: the live saves, or their backup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Side {
+    Device,
+    Backup,
+}
+
 // ── Status ───────────────────────────────────────────────────────────────
 
 /// The files of a set of folders: newest modification, count, total size.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Stamp {
     pub modified: SystemTime,
     pub files: usize,
     pub bytes: u64,
+}
+
+impl Stamp {
+    /// The newest modification in whole seconds: what survives a copy
+    /// between machines (tar), so what two sides compare.
+    pub fn seconds(&self) -> u64 {
+        self.modified
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs())
+    }
 }
 
 fn stamp(dirs: impl IntoIterator<Item = PathBuf>) -> Option<Stamp> {
@@ -271,6 +296,20 @@ pub struct Report {
     pub missing: Vec<PathBuf>,
     /// The game has save folders and none of them exist.
     pub none_found: bool,
+    /// Why saves from another machine can't replace the saves here, and
+    /// the backup here ([`cannot_receive`]).
+    pub cannot_receive_saves: Option<String>,
+    pub cannot_receive_backup: Option<String>,
+}
+
+impl Report {
+    /// Why saves from another machine can't replace `into` here, if so.
+    pub fn cannot_receive(&self, into: Side) -> Option<&str> {
+        match into {
+            Side::Device => self.cannot_receive_saves.as_deref(),
+            Side::Backup => self.cannot_receive_backup.as_deref(),
+        }
+    }
 }
 
 const NO_SAVES: &str = "No saves to back up yet.";
@@ -298,6 +337,8 @@ pub fn report(saves: &Saves) -> Report {
     Report {
         missing,
         none_found,
+        cannot_receive_saves: cannot_receive(saves, Side::Device),
+        cannot_receive_backup: cannot_receive(saves, Side::Backup),
         cannot_back_up: refused
             .clone()
             .or_else(|| device.is_none().then_some(empty)),
@@ -325,6 +366,14 @@ fn refusal(saves: &Saves) -> Option<String> {
     })
 }
 
+/// Why saves can't be written to `into`, if they can't.
+fn cannot_receive(saves: &Saves, into: Side) -> Option<String> {
+    match into {
+        Side::Device => refusal(saves).or_else(|| missing_prefix(saves)),
+        Side::Backup => refusal(saves),
+    }
+}
+
 fn missing_prefix(saves: &Saves) -> Option<String> {
     saves
         .prefix
@@ -343,13 +392,17 @@ fn io_error(path: &Path) -> impl Fn(std::io::Error) -> String + '_ {
 /// replace the previous one right after.
 fn copy_file(src: &Path, dst: &Path) -> Result<(), String> {
     paths::copy_with_mtime(src, dst).map_err(io_error(src))?;
+    sync_file(dst)
+}
+
+fn sync_file(path: &Path) -> Result<(), String> {
     // Windows flushes through a handle with write access only.
     std::fs::File::options()
         .read(true)
         .write(cfg!(windows))
-        .open(dst)
+        .open(path)
         .and_then(|f| f.sync_all())
-        .map_err(io_error(dst))
+        .map_err(io_error(path))
 }
 
 /// Copy `src` into `dst`, empty folders included; the number of files.
@@ -379,14 +432,16 @@ fn remove_dir_if_exists(dir: &Path) -> Result<(), String> {
 /// stays, so a save folder linked elsewhere still is.
 fn empty_dir(dir: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(io_error(dir))?;
-    entries(dir).iter().try_for_each(|path| {
-        if path.is_dir() {
-            std::fs::remove_dir_all(path)
-        } else {
-            std::fs::remove_file(path)
-        }
-        .map_err(io_error(path))
-    })
+    entries(dir).iter().try_for_each(|path| remove_entry(path))
+}
+
+fn remove_entry(path: &Path) -> Result<(), String> {
+    if path.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
+    .map_err(io_error(path))
 }
 
 /// Where a backup is written before it is complete (hidden).
@@ -464,23 +519,188 @@ fn swap_in(part: &Path, target: &Path, old: &Path) -> Result<(), String> {
 /// Replace the save folders' contents with the backup. Folders with no copy
 /// in the backup are left alone.
 pub fn restore(saves: &Saves) -> Result<(), String> {
-    if let Some(why) = refusal(saves).or_else(|| missing_prefix(saves)) {
+    if let Some(why) = cannot_receive(saves, Side::Device) {
         return Err(why);
     }
     recover(saves)?;
-    let sources: Vec<(&SaveFolder, PathBuf)> = saves
-        .folders
-        .iter()
-        .map(|f| (f, saves.backup.join(&f.name)))
-        .filter(|(_, copy)| copy.is_dir())
-        .collect();
+    let sources = copies_in(saves, &saves.backup);
     if sources.is_empty() {
         return Err(NO_BACKUP.into());
     }
+    replace_saves(&sources)
+}
+
+/// The save folders with a copy in `root`, and that copy.
+fn copies_in<'a>(saves: &'a Saves, root: &Path) -> Vec<(&'a SaveFolder, PathBuf)> {
+    saves
+        .folders
+        .iter()
+        .map(|f| (f, root.join(&f.name)))
+        .filter(|(_, copy)| copy.is_dir())
+        .collect()
+}
+
+fn replace_saves(sources: &[(&SaveFolder, PathBuf)]) -> Result<(), String> {
     sources.iter().try_for_each(|(folder, copy)| {
         empty_dir(&folder.device)?;
         copy_tree(copy, &folder.device).map(|_| ())
     })
+}
+
+// ── Between machines ─────────────────────────────────────────────────────
+
+const NO_MATCH: &str =
+    "None of the save folders sent are this game's here: check its save paths (Library, X).";
+
+/// The folders of `side` another machine may copy, by their backup names.
+/// No live saves when a restore here would be refused: a save path too
+/// wide would send a whole home folder.
+fn shared_folders(saves: &Saves, side: Side) -> Vec<(String, PathBuf)> {
+    if side == Side::Device && refusal(saves).is_some() {
+        return Vec::new();
+    }
+    saves
+        .folders
+        .iter()
+        .map(|f| {
+            let dir = match side {
+                Side::Device => f.device.clone(),
+                Side::Backup => saves.backup.join(&f.name),
+            };
+            (f.name.clone(), dir)
+        })
+        .filter(|(_, dir)| dir.is_dir())
+        .collect()
+}
+
+/// What `side` holds, as offered to other machines.
+pub fn offered(saves: &Saves, side: Side) -> Option<Stamp> {
+    stamp(shared_folders(saves, side).into_iter().map(|(_, dir)| dir))
+}
+
+/// Write `side` as a tar of `<save folder>/...`: file times kept, links
+/// left out.
+pub fn send(saves: &Saves, side: Side, out: impl Write) -> io::Result<()> {
+    let mut tar = tar::Builder::new(out);
+    shared_folders(saves, side)
+        .iter()
+        .try_for_each(|(name, dir)| append_tree(&mut tar, dir, Path::new(name)))?;
+    tar.finish()
+}
+
+fn append_tree<W: Write>(tar: &mut tar::Builder<W>, dir: &Path, name: &Path) -> io::Result<()> {
+    tar.append_dir(name, dir)?;
+    entries(dir).iter().try_for_each(|path| {
+        let inner = name.join(path.file_name().unwrap_or_default());
+        if path.is_dir() {
+            append_tree(tar, path, &inner)
+        } else {
+            tar.append_path_with_name(path, &inner)
+        }
+    })
+}
+
+/// Where saves sent by another machine arrive (hidden).
+fn arriving_of(backup: &Path) -> PathBuf {
+    let name = backup.file_name().unwrap_or_default().to_string_lossy();
+    backup.with_file_name(format!(".{name}.net.part"))
+}
+
+/// Replace the saves or the backup (`into`) with an archive another machine
+/// sent ([`send`]), at most `limit` bytes of files. Nothing changes unless
+/// the whole archive arrived and one of its folders is one of the game's
+/// here. The game's save folders that weren't sent are left alone, and
+/// returned by name.
+pub fn receive(
+    saves: &Saves,
+    into: Side,
+    archive: impl Read,
+    limit: u64,
+) -> Result<Vec<String>, String> {
+    if let Some(why) = cannot_receive(saves, into) {
+        return Err(why);
+    }
+    recover(saves)?;
+    let arriving = arriving_of(&saves.backup);
+    remove_dir_if_exists(&arriving)?;
+    let result = unpack_saves(archive, &arriving, limit).and_then(|()| match into {
+        Side::Device => into_saves(saves, &arriving),
+        Side::Backup => into_backup(saves, &arriving),
+    });
+    // Gone already when it became the backup.
+    let _ = std::fs::remove_dir_all(&arriving);
+    result
+}
+
+/// The archive's plain files and folders into `into`, synced; anything else
+/// (a link, a path out of `into`) refuses the whole archive.
+fn unpack_saves(archive: impl Read, into: &Path, limit: u64) -> Result<(), String> {
+    std::fs::create_dir_all(into).map_err(io_error(into))?;
+    let mut tar = tar::Archive::new(archive);
+    let mut total = 0u64;
+    // A loop: each entry must be read before the next one.
+    for entry in tar.entries().map_err(|e| e.to_string())? {
+        let mut entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path().map_err(|e| e.to_string())?.into_owned();
+        let kind = entry.header().entry_type();
+        if !kind.is_file() && !kind.is_dir() {
+            return Err(format!("Not a file or a folder: {}", path.display()));
+        }
+        total += entry.size();
+        if total > limit {
+            return Err(format!("More than the {} announced", sizer::human(limit)));
+        }
+        let dest = package::safe_join(into, &path)?;
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(io_error(parent))?;
+        }
+        entry.unpack(&dest).map_err(io_error(&dest))?;
+    }
+    file_map(into).values().try_for_each(|path| sync_file(path))
+}
+
+/// The game's save folders with no copy in `arriving`, by name; an error
+/// when none has one.
+fn not_sent(saves: &Saves, arriving: &Path) -> Result<Vec<String>, String> {
+    let missing: Vec<String> = saves
+        .folders
+        .iter()
+        .filter(|f| !arriving.join(&f.name).is_dir())
+        .map(|f| f.name.clone())
+        .collect();
+    if missing.len() == saves.folders.len() {
+        return Err(NO_MATCH.into());
+    }
+    Ok(missing)
+}
+
+fn into_saves(saves: &Saves, arriving: &Path) -> Result<Vec<String>, String> {
+    let missing = not_sent(saves, arriving)?;
+    replace_saves(&copies_in(saves, arriving))?;
+    Ok(missing)
+}
+
+/// The backup becomes what arrived, keeping its copies of the folders that
+/// weren't sent; folders that aren't the game's are dropped.
+fn into_backup(saves: &Saves, arriving: &Path) -> Result<Vec<String>, String> {
+    let missing = not_sent(saves, arriving)?;
+    let names: HashSet<&str> = saves.folders.iter().map(|f| f.name.as_str()).collect();
+    entries(arriving)
+        .iter()
+        .filter(|path| {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            !names.contains(name.as_ref())
+        })
+        .try_for_each(|path| remove_entry(path))?;
+    missing
+        .iter()
+        .map(|name| (saves.backup.join(name), arriving.join(name)))
+        .filter(|(kept, _)| kept.is_dir())
+        .try_for_each(|(kept, to)| copy_tree(&kept, &to).map(|_| ()))?;
+    let old = old_of(&saves.backup);
+    remove_dir_if_exists(&old)?;
+    swap_in(arriving, &saves.backup, &old)?;
+    Ok(missing)
 }
 
 #[cfg(test)]
@@ -797,5 +1017,191 @@ mod tests {
             .cannot_back_up
             .unwrap()
             .starts_with("Launch the game once"));
+    }
+
+    // ── Between machines ─────────────────────────────────────────────────
+
+    /// What [`send`] writes for `side`.
+    fn sent(saves: &Saves, side: Side) -> Vec<u8> {
+        let mut archive = Vec::new();
+        send(saves, side, &mut archive).unwrap();
+        archive
+    }
+
+    /// The other machine: `there/` with the same game and save paths.
+    fn there(dir: &TempDir, live: &[&str]) -> Saves {
+        let mut game = Game::skeleton(&dir.path().join("there/games/Game"));
+        game.resolved_save_paths = live
+            .iter()
+            .map(|s| dir.path().join("there").join(s))
+            .collect();
+        saves_of(&game, &dir.path().join("there/saves-copies"))
+    }
+
+    #[test]
+    fn saves_from_another_machine_replace_the_saves_here_with_their_dates() {
+        let dir = TempDir::new();
+        dir.write("there/one/slot.sav", b"there");
+        dir.write("there/one/sub/more.sav", b"more");
+        dir.write("one/slot.sav", b"here");
+        dir.write("one/stale.sav", b"stale");
+        let remote = there(&dir, &["one"]);
+        let saves = saves(&dir, &game(&dir, &["one"]));
+
+        let missing = receive(
+            &saves,
+            Side::Device,
+            &sent(&remote, Side::Device)[..],
+            1 << 20,
+        );
+        assert_eq!(missing, Ok(vec![]));
+        assert_eq!(read(dir.path().join("one/slot.sav")), "there");
+        assert_eq!(read(dir.path().join("one/sub/more.sav")), "more");
+        assert!(!dir.path().join("one/stale.sav").exists());
+        let (here, from) = (
+            report(&saves).device.unwrap(),
+            offered(&remote, Side::Device).unwrap(),
+        );
+        assert_eq!(here.seconds(), from.seconds(), "tar keeps whole seconds");
+        assert_eq!(
+            paths::sorted_entries(&dir.path().join("saves-copies")),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn a_backup_from_another_machine_becomes_the_backup_here() {
+        let dir = TempDir::new();
+        dir.write("there/saves-copies/Game/one/slot.sav", b"there");
+        dir.write("there/saves-copies/Game/two/kept.sav", b"old there");
+        dir.write("one/slot.sav", b"live");
+        dir.write("saves-copies/Game/one/slot.sav", b"old backup");
+        dir.write("saves-copies/Game/three/kept.sav", b"kept");
+        let remote = there(&dir, &["one", "two"]);
+        let saves = saves(&dir, &game(&dir, &["one", "three"]));
+
+        let missing = receive(
+            &saves,
+            Side::Backup,
+            &sent(&remote, Side::Backup)[..],
+            1 << 20,
+        );
+        assert_eq!(missing, Ok(vec!["three".to_string()]));
+        assert_eq!(read(saves.backup.join("one/slot.sav")), "there");
+        assert_eq!(read(saves.backup.join("three/kept.sav")), "kept");
+        assert!(
+            !saves.backup.join("two").exists(),
+            "not this game's folder here"
+        );
+        assert_eq!(read(dir.path().join("one/slot.sav")), "live");
+        assert_eq!(
+            paths::sorted_entries(&dir.path().join("saves-copies")),
+            ["Game"]
+        );
+    }
+
+    #[test]
+    fn a_cut_archive_changes_nothing() {
+        let dir = TempDir::new();
+        dir.write("there/one/slot.sav", &[7u8; 5000]);
+        dir.write("one/slot.sav", b"here");
+        dir.write("saves-copies/Game/one/slot.sav", b"backup");
+        let archive = sent(&there(&dir, &["one"]), Side::Device);
+        let saves = saves(&dir, &game(&dir, &["one"]));
+
+        let cut = &archive[..archive.len() / 2];
+        assert!(receive(&saves, Side::Device, cut, 1 << 20).is_err());
+        assert!(receive(&saves, Side::Backup, cut, 1 << 20).is_err());
+        assert_eq!(read(dir.path().join("one/slot.sav")), "here");
+        assert_eq!(read(saves.backup.join("one/slot.sav")), "backup");
+        assert_eq!(
+            paths::sorted_entries(&dir.path().join("saves-copies")),
+            ["Game"]
+        );
+    }
+
+    #[test]
+    fn more_than_announced_is_refused() {
+        let dir = TempDir::new();
+        dir.write("there/one/slot.sav", &[7u8; 5000]);
+        let archive = sent(&there(&dir, &["one"]), Side::Device);
+        let saves = saves(&dir, &game(&dir, &["one"]));
+
+        assert!(receive(&saves, Side::Device, &archive[..], 4999).is_err());
+        assert!(!dir.path().join("one").exists());
+    }
+
+    fn archive_with(kind: tar::EntryType, path: &str, link: Option<&str>) -> Vec<u8> {
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(kind);
+        header.set_size(0);
+        header.set_mode(0o644);
+        if let Some(link) = link {
+            header.set_link_name(link).unwrap();
+        }
+        // set_path refuses `..`: write the name as a hostile peer would.
+        header.as_old_mut().name[..path.len()].copy_from_slice(path.as_bytes());
+        header.set_cksum();
+        let mut tar = tar::Builder::new(Vec::new());
+        tar.append(&header, &[][..]).unwrap();
+        tar.into_inner().unwrap()
+    }
+
+    #[test]
+    fn links_and_paths_out_of_the_save_folder_are_refused() {
+        let dir = TempDir::new();
+        let saves = saves(&dir, &game(&dir, &["one"]));
+        let link = archive_with(tar::EntryType::Symlink, "one/home", Some("/home"));
+        let escape = archive_with(tar::EntryType::Regular, "one/../../evil", None);
+
+        assert!(receive(&saves, Side::Device, &link[..], 1 << 20)
+            .unwrap_err()
+            .contains("Not a file"));
+        assert!(receive(&saves, Side::Device, &escape[..], 1 << 20)
+            .unwrap_err()
+            .contains("Unsafe"));
+        assert!(!dir.path().join("evil").exists() && !dir.path().join("one").exists());
+    }
+
+    #[test]
+    fn save_folders_that_do_not_match_are_refused() {
+        let dir = TempDir::new();
+        dir.write("there/Other/slot.sav", b"there");
+        dir.write("one/slot.sav", b"here");
+        let archive = sent(&there(&dir, &["Other"]), Side::Device);
+        let saves = saves(&dir, &game(&dir, &["one"]));
+
+        assert_eq!(
+            receive(&saves, Side::Device, &archive[..], 1 << 20),
+            Err(NO_MATCH.into())
+        );
+        assert_eq!(read(dir.path().join("one/slot.sav")), "here");
+    }
+
+    #[test]
+    fn saves_behind_an_unsafe_save_path_are_not_offered() {
+        let dir = TempDir::new();
+        dir.write("there/saves-copies/Game/there/a.sav", b"backup");
+        let remote = there(&dir, &[""]);
+        assert!(remote.too_wide.is_some());
+        assert_eq!(offered(&remote, Side::Device), None);
+        assert!(
+            sent(&remote, Side::Device).iter().all(|&b| b == 0),
+            "an empty archive"
+        );
+    }
+
+    #[test]
+    fn backing_up_first_keeps_the_saves_a_copy_replaces() {
+        let dir = TempDir::new();
+        dir.write("there/one/slot.sav", b"there");
+        dir.write("one/slot.sav", b"mine");
+        let archive = sent(&there(&dir, &["one"]), Side::Device);
+        let saves = saves(&dir, &game(&dir, &["one"]));
+
+        backup(&saves).unwrap();
+        receive(&saves, Side::Device, &archive[..], 1 << 20).unwrap();
+        assert_eq!(read(dir.path().join("one/slot.sav")), "there");
+        assert_eq!(read(saves.backup.join("one/slot.sav")), "mine");
     }
 }

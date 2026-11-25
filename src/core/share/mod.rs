@@ -6,23 +6,49 @@ pub mod discovery;
 pub mod server;
 
 use std::cmp::Ordering;
+use std::path::Path;
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
 use super::config::Config;
 use super::models::{Game, ImageSlot, Target};
+use super::saver::Stamp;
 
 /// Bumped on incompatible API changes; peers with another one are shown,
 /// with which side to update, but not listed.
 /// 2: renamed to •cartridge (the discovery query changed too).
 pub const PROTOCOL: u32 = 2;
 pub const DEFAULT_PORT: u16 = 47800;
+/// What this side serves beyond games, added without a protocol change: a
+/// peer lacking one is told to update.
+pub const SAVES: &str = "saves";
+const FEATURES: [&str; 1] = [SAVES];
 
 /// `SHARE_PORT`, else the default.
 pub fn port(cfg: &Config) -> u16 {
     cfg.get("SHARE_PORT")
         .and_then(|p| p.trim().parse().ok())
         .unwrap_or(DEFAULT_PORT)
+}
+
+/// What this cartridge shares: its games and save backups, under the host
+/// name and this run's id.
+pub fn shelf(cfg: &Config, games_dir: &Path) -> server::Shelf {
+    server::Shelf {
+        games_dir: games_dir.to_path_buf(),
+        saves_root: cfg.saves_copies_dir(),
+        name: machine_name(),
+        id: instance_id().to_string(),
+    }
+}
+
+/// This run's id, new at each start: tells this app's own server from the
+/// others when it answers discovery. Not the cartridge id: a cartridge
+/// copied whole to another machine keeps that one.
+pub fn instance_id() -> &'static str {
+    static ID: OnceLock<String> = OnceLock::new();
+    ID.get_or_init(super::app::new_id)
 }
 
 /// Name shown to other machines: the host name.
@@ -70,6 +96,17 @@ impl From<&Game> for RemoteGame {
     }
 }
 
+/// A game's saves on a server (`GET /api/v1/games/{id}/saves`).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RemoteSaves {
+    /// The live saves: none when the game is running there, or its save
+    /// path is unsafe to send.
+    pub device: Option<Stamp>,
+    pub backup: Option<Stamp>,
+    /// The game is running on the server.
+    pub playing: bool,
+}
+
 /// `GET /api/v1/info` and discovery replies.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerInfo {
@@ -77,16 +114,28 @@ pub struct ServerInfo {
     pub port: u16,
     pub version: String,
     pub protocol: u32,
+    /// The server's [`instance_id`]: this app's own server answers
+    /// discovery too. Empty from older versions.
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub features: Vec<String>,
 }
 
 impl ServerInfo {
-    pub fn new(name: String, port: u16) -> ServerInfo {
+    pub fn new(name: String, id: String, port: u16) -> ServerInfo {
         ServerInfo {
             name,
             port,
             version: super::self_update::VERSION.into(),
             protocol: PROTOCOL,
+            id,
+            features: FEATURES.map(String::from).to_vec(),
         }
+    }
+
+    pub fn has(&self, feature: &str) -> bool {
+        self.features.iter().any(|f| f == feature)
     }
 
     /// Why this machine and the server can't share, if they can't.
@@ -137,12 +186,30 @@ mod tests {
 
     #[test]
     fn a_server_of_another_protocol_says_which_side_to_update() {
-        let mut info = ServerInfo::new("deck".into(), 1);
+        let mut info = ServerInfo::new("deck".into(), "id".into(), 1);
         assert_eq!(info.mismatch(), None);
         info.protocol = PROTOCOL + 1;
         assert!(info.mismatch().unwrap().contains("update this one"));
         info.protocol = PROTOCOL - 1;
         assert!(info.mismatch().unwrap().contains("update it"));
+    }
+
+    #[test]
+    fn the_shared_id_is_this_runs_not_the_cartridges() {
+        let cfg = Config::from_raw("/ws/system/config.txt".into(), Default::default());
+        let shelf = shelf(&cfg, Path::new("/ws/games"));
+        assert_eq!(shelf.id, instance_id());
+        assert_eq!(instance_id(), instance_id());
+        assert_eq!(instance_id().len(), 32);
+    }
+
+    #[test]
+    fn an_older_server_has_no_id_nor_features() {
+        let old = r#"{"name":"deck","port":1,"version":"1.0.0","protocol":2}"#;
+        let info: ServerInfo = serde_json::from_str(old).unwrap();
+        assert_eq!(info.id, "");
+        assert!(!info.has(SAVES));
+        assert!(ServerInfo::new("x".into(), "id".into(), 1).has(SAVES));
     }
 
     #[test]

@@ -85,7 +85,8 @@
 # 3. SHARING ON THE LAN
 # ==========================================
 
-# Let other •cartridge machines on the network see and copy your games (optional).
+# Let other •cartridge machines on the network see and copy your games, and the
+# saves and save backups of games they have too (optional).
 # No password: only enable on a network you trust.
 #SHARE_ENABLED=False
 

@@ -22,6 +22,8 @@ use crate::core::proton::{Downloads, Runner, CANCELLED};
 /// A launched game. `running()` flips to false once the game has exited.
 pub struct Session {
     pub title: String,
+    /// The game's folder name.
+    pub folder: String,
     running: Arc<AtomicBool>,
     /// What is being prepared before the game starts.
     step: Arc<Mutex<Option<String>>>,
@@ -32,9 +34,10 @@ pub struct Session {
 }
 
 impl Session {
-    fn new(title: &str, running: Arc<AtomicBool>) -> Session {
+    fn new(game: &Game, running: Arc<AtomicBool>) -> Session {
         Session {
-            title: title.to_string(),
+            title: game.title.clone(),
+            folder: game.folder_name.clone(),
             running,
             step: Arc::default(),
             error: Arc::default(),
@@ -109,7 +112,7 @@ pub fn launch(game: &Game, downloads: &Downloads) -> Result<Session, String> {
     cmd.args(resolved.launch_options.split_whitespace())
         .current_dir(&resolved.start_in);
     let running = spawn_detached(cmd).map_err(|e| format!("Launch failed: {e}"))?;
-    Ok(Session::new(&game.title, running))
+    Ok(Session::new(game, running))
 }
 
 /// Prepare the prefix, then run the game and wait for it, on a thread.
@@ -123,7 +126,7 @@ fn launch_with_proton(game: &Game, downloads: &Downloads) -> Result<Session, Str
     }
     let runner = Runner::for_game(game, downloads)?;
     let verbs = game.proton.winetricks.clone();
-    let session = Session::new(&game.title, Arc::new(AtomicBool::new(true)));
+    let session = Session::new(game, Arc::new(AtomicBool::new(true)));
     let (running, step, failure, cancel) = (
         session.running.clone(),
         session.step.clone(),
@@ -186,7 +189,8 @@ mod tests {
 
     #[test]
     fn a_cancelled_launch_is_not_an_error() {
-        let session = Session::new("WinGame", Arc::default());
+        let game = Game::skeleton(std::path::Path::new("/games/WinGame"));
+        let session = Session::new(&game, Arc::default());
         set(&session.error, Some(CANCELLED.into()));
         assert!(session.cancelled());
         assert_eq!(session.error(), None);

@@ -1,6 +1,7 @@
 //! Client side: find peers, list their games, and copy a game either as a
 //! package (Download: kept as `Foo.cartridge.tar`, e.g. on a library machine)
 //! or straight into a folder (Install: unpacked while it streams, no tar on disk).
+//! A game's saves or save backup can be copied from a peer too.
 
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Read, Write};
@@ -9,22 +10,40 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::discovery::{self, Peer};
-use super::{encode_segment, port, RemoteGame, ServerInfo};
+use super::{encode_segment, instance_id, port, RemoteGame, RemoteSaves, ServerInfo};
 use crate::core::config::Config;
 use crate::core::package::{self, Progress};
+use crate::core::saver::{self, Saves, Side};
 
 const LIST_TIMEOUT: Duration = Duration::from_secs(10);
 /// Per read: a stalled stream fails instead of hanging; a long one is fine.
 const STREAM_TIMEOUT: Duration = Duration::from_secs(60);
 
-fn get(url: &str, read_timeout: Duration) -> Result<ureq::Response, String> {
+fn request(url: &str, read_timeout: Duration) -> Result<ureq::Response, Box<ureq::Error>> {
     ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(5))
         .timeout_read(read_timeout)
         .build()
         .get(url)
         .call()
-        .map_err(|e| e.to_string())
+        .map_err(Box::new)
+}
+
+fn get(url: &str, read_timeout: Duration) -> Result<ureq::Response, String> {
+    request(url, read_timeout).map_err(|e| message_of(*e))
+}
+
+/// The server's own `{"error": ...}` when it sent one.
+fn message_of(error: ureq::Error) -> String {
+    let fallback = error.to_string();
+    let ureq::Error::Status(_, response) = error else {
+        return fallback;
+    };
+    read_body(response, MAX_BODY)
+        .ok()
+        .and_then(|body| serde_json::from_slice::<serde_json::Value>(&body).ok())
+        .and_then(|body| Some(body.get("error")?.as_str()?.to_string()))
+        .unwrap_or(fallback)
 }
 
 /// Covers are a few hundred KB, game lists well under a MB: a broken or
@@ -82,19 +101,29 @@ fn configured_peers(cfg: &Config) -> Vec<Peer> {
         .collect()
 }
 
-/// Servers answering the LAN broadcast, plus the configured ones.
+/// Servers answering the LAN broadcast, plus the configured ones; not this
+/// app's own server, which answers too.
 pub fn find_peers(cfg: &Config) -> Vec<Peer> {
     let found = discovery::discover(port(cfg), Duration::from_secs(1));
     let configured = configured_peers(cfg);
-    found
+    distinct(found.into_iter().chain(configured))
         .into_iter()
-        .chain(configured)
-        .fold(Vec::new(), |mut acc, peer| {
-            if !acc.iter().any(|p: &Peer| p.addr == peer.addr) {
-                acc.push(peer);
-            }
-            acc
-        })
+        .filter(|peer| peer.info.id != instance_id())
+        .collect()
+}
+
+/// Each server once: one found by broadcast and listed in SHARE_PEERS, or
+/// reached at two addresses, has the same id (older servers have none:
+/// told apart by address only).
+fn distinct(peers: impl IntoIterator<Item = Peer>) -> Vec<Peer> {
+    let same =
+        |a: &Peer, b: &Peer| a.addr == b.addr || (!a.info.id.is_empty() && a.info.id == b.info.id);
+    peers.into_iter().fold(Vec::new(), |mut acc, peer| {
+        if !acc.iter().any(|p| same(p, &peer)) {
+            acc.push(peer);
+        }
+        acc
+    })
 }
 
 pub fn list(addr: SocketAddr) -> Result<Vec<RemoteGame>, String> {
@@ -104,6 +133,42 @@ pub fn list(addr: SocketAddr) -> Result<Vec<RemoteGame>, String> {
 pub fn cover(addr: SocketAddr, id: &str) -> Option<Vec<u8>> {
     let response = get(&game_url(addr, id, "cover"), LIST_TIMEOUT).ok()?;
     read_body(response, MAX_BODY).ok()
+}
+
+/// The saves of game `id` on a server sharing saves ([`super::SAVES`]);
+/// `None` when it doesn't have the game.
+pub fn saves(addr: SocketAddr, id: &str) -> Result<Option<RemoteSaves>, String> {
+    let response = match request(&game_url(addr, id, "saves"), LIST_TIMEOUT) {
+        Ok(response) => response,
+        Err(e) if matches!(*e, ureq::Error::Status(404, _)) => return Ok(None),
+        Err(e) => return Err(message_of(*e)),
+    };
+    let body = read_body(response, MAX_BODY)?;
+    serde_json::from_slice(&body)
+        .map(Some)
+        .map_err(|e| e.to_string())
+}
+
+/// Copy `side` of game `id` on the server into `into` here (see
+/// [`saver::receive`]); `announced`: the bytes its listing gave. The save
+/// folders here that weren't sent, by name.
+pub fn copy_saves(
+    addr: SocketAddr,
+    id: &str,
+    side: Side,
+    saves: &Saves,
+    into: Side,
+    announced: u64,
+) -> Result<Vec<String>, String> {
+    let which = match side {
+        Side::Device => "saves/device",
+        Side::Backup => "saves/backup",
+    };
+    let response = get(&game_url(addr, id, which), STREAM_TIMEOUT)?;
+    // The game may save between the listing and the copy: room for that,
+    // not for a peer filling the disk.
+    let limit = announced.saturating_mul(2).max(MAX_BODY);
+    saver::receive(saves, into, response.into_reader(), limit)
 }
 
 /// Why `id` can't be copied into `games_dir`, if it can't: the game is
@@ -217,6 +282,23 @@ mod tests {
     }
 
     #[test]
+    fn a_server_reached_twice_is_listed_once() {
+        let peer = |id: &str, port| Peer {
+            info: ServerInfo::new("deck".into(), id.into(), port),
+            addr: addr(port),
+        };
+        let peers = distinct([
+            peer("a", 1),
+            peer("a", 2),
+            peer("b", 1),
+            peer("", 3),
+            peer("", 4),
+        ]);
+        let ports: Vec<u16> = peers.iter().map(|p| p.addr.port()).collect();
+        assert_eq!(ports, [1, 3, 4]);
+    }
+
+    #[test]
     fn probes_a_host() {
         let dir = TempDir::new();
         let server = sharing(&dir);
@@ -299,5 +381,70 @@ mod tests {
         )
         .is_err());
         assert_eq!(fs::read_dir(&games_dir).unwrap().count(), 0);
+    }
+
+    /// "My Game" there saving in `there/live`, and here in `live`.
+    fn sharing_saves(dir: &TempDir) -> (crate::core::share::server::Server, Saves) {
+        let save_path = |root: &str| crate::core::models::SavePath {
+            os: String::new(),
+            path: dir.path().join(root).to_string_lossy().into_owned(),
+        };
+        let mut game = Game::skeleton(&dir.path().join("server/games/My Game"));
+        game.save_paths = vec![save_path("there/live")];
+        dir.write(
+            &format!("server/games/My Game/{GAME_DATA_DIR}/{GAME_JSON}"),
+            game.to_json().as_bytes(),
+        );
+        let mut here = Game::skeleton(&dir.path().join("games/My Game"));
+        here.resolved_save_paths = vec![dir.path().join("live")];
+        let saves = saver::saves_of(&here, &dir.path().join("saves-copies"));
+        (local_server(&dir.path().join("server/games")), saves)
+    }
+
+    #[test]
+    fn copies_a_peers_saves_into_the_saves_here() {
+        let dir = TempDir::new();
+        dir.write("there/live/slot.sav", b"there");
+        dir.write("live/slot.sav", b"here");
+        let (server, saves) = sharing_saves(&dir);
+        let remote = self::saves(addr(server.port()), "My Game")
+            .unwrap()
+            .unwrap();
+        let bytes = remote.device.unwrap().bytes;
+
+        let missing = copy_saves(
+            addr(server.port()),
+            "My Game",
+            Side::Device,
+            &saves,
+            Side::Device,
+            bytes,
+        );
+        assert_eq!(missing, Ok(vec![]));
+        assert_eq!(
+            fs::read_to_string(dir.path().join("live/slot.sav")).unwrap(),
+            "there"
+        );
+        assert_eq!(remote.backup, None);
+    }
+
+    #[test]
+    fn a_peer_without_the_game_has_no_saves_and_refusals_say_why() {
+        let dir = TempDir::new();
+        dir.write("there/live/slot.sav", b"there");
+        let (server, saves) = sharing_saves(&dir);
+        assert_eq!(self::saves(addr(server.port()), "Nope"), Ok(None));
+
+        server.set_playing(Some("My Game".into()));
+        let refused = copy_saves(
+            addr(server.port()),
+            "My Game",
+            Side::Device,
+            &saves,
+            Side::Device,
+            5,
+        );
+        assert!(refused.unwrap_err().contains("running there"));
+        assert!(!dir.path().join("live").exists());
     }
 }

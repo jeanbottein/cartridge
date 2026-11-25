@@ -115,7 +115,7 @@ pub fn unpack(games_dir: &Path, name: &str) -> ExitCode {
 /// (headless library machine).
 pub fn serve(config: &Config, games_dir: &Path) -> ExitCode {
     let port = share::port(config);
-    let _server = match Server::start(games_dir, share::machine_name(), port) {
+    let _server = match Server::start(&share::shelf(config, games_dir), port) {
         Ok(server) => server,
         Err(e) => {
             error!("Cannot share on port {port}: {e}");

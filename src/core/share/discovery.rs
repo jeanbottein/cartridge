@@ -109,7 +109,7 @@ mod tests {
     #[test]
     fn keeps_servers_of_other_protocols_and_ignores_junk() {
         let from = SocketAddr::from((Ipv4Addr::LOCALHOST, 1));
-        let mut info = ServerInfo::new("x".into(), 9);
+        let mut info = ServerInfo::new("x".into(), "id".into(), 9);
         info.protocol += 1;
         let peer = parse_reply(&serde_json::to_vec(&info).unwrap(), from).unwrap();
         assert_eq!(peer.info.protocol, info.protocol);
